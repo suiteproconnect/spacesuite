@@ -1,0 +1,27 @@
+{
+  "name": "spaceSUITE",
+  "short_name": "spaceSUITE",
+  "description": "Salas de video privadas y grupales cara a cara en tu propio universo.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#02030a",
+  "theme_color": "#02030a",
+  "icons": [
+    {
+      "src": "/assets/aistudio/icon-192_b1826486.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/assets/aistudio/icon-512_41c8fb5a.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "/assets/aistudio/icon-maskable-512_995727b7.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

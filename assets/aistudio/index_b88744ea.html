@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#02030a">
+<title>spaceSUITE · Salas de video privadas</title>
+<meta name="description" content="Salas de video privadas, cara a cara, en tu propio universo. Sin tiendas de apps: se instala desde el navegador.">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="fonts.css">
+<style>
+:root{color-scheme:dark;--moon:#f4f6ff;--dim:#9aa3c7;--blue:#4d7cff;--mint:#3ee6b4;--line:rgba(160,185,255,.16);--glass:rgba(10,14,30,.55);box-sizing:border-box}
+*,*::before,*::after{box-sizing:inherit}
+html{scroll-behavior:smooth}
+body{margin:0;background:radial-gradient(60% 38% at 82% 4%,rgba(63,116,255,.30),transparent 70%),radial-gradient(55% 45% at 6% 58%,rgba(100,70,255,.16),transparent 70%),#02030a;color:var(--moon);font-family:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;line-height:1.55;-webkit-font-smoothing:antialiased;padding-bottom:env(safe-area-inset-bottom,0)}
+.stars{position:fixed;inset:0;z-index:0;pointer-events:none}
+.stars i{position:absolute;left:0;top:0;border-radius:50%}
+.l1,.l2{width:1px;height:1px}.l3{width:3px;height:3px;box-shadow:0 0 9px 2px rgba(130,170,255,.85)}
+.l1{animation:tw 7s ease-in-out infinite}.l2{animation:tw 9s ease-in-out -3s infinite reverse}.l3{animation:tw 12s ease-in-out -6s infinite}
+@keyframes tw{0%,100%{opacity:.2}50%{opacity:1}}
+main,footer{position:relative;z-index:1}
+section{max-width:960px;margin:0 auto;padding:64px 22px}
+.hero{min-height:100svh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding-top:calc(40px + env(safe-area-inset-top,0))}
+.lg{display:flex;flex-direction:column;align-items:center;gap:22px;margin-bottom:26px}
+.lw{position:relative;width:min(44vw,168px);aspect-ratio:1;filter:drop-shadow(0 18px 44px rgba(63,116,255,.45))}
+.lw img{width:100%;height:100%;display:block;animation:fl 7s ease-in-out infinite}
+@keyframes fl{50%{transform:translateY(-6px)}}
+.wm{display:flex;flex-direction:column;align-items:center;gap:10px;line-height:1}
+.wm b{font:300 clamp(1.25rem,6vw,1.7rem) "Inter Display","Inter",sans-serif;letter-spacing:.34em;margin-right:-.34em;text-transform:uppercase}
+.wm b i{font-style:normal;font-weight:600}
+.wm span{font:500 .62rem "Inter",sans-serif;letter-spacing:.5em;margin-right:-.5em;text-transform:uppercase;color:var(--mint)}
+h1{margin:34px 0 12px;font:600 clamp(2rem,8vw,3.1rem)/1.08 "Inter Display","Inter",sans-serif;letter-spacing:-.03em}
+.launch{margin:0 0 14px;display:inline-block;padding:7px 16px;border-radius:999px;border:1px solid rgba(62,230,180,.45);color:var(--mint);font:600 .8rem "Inter",sans-serif;letter-spacing:.02em}
+.sub{max-width:34ch;color:var(--dim);margin:0 auto 30px;font-size:1.02rem}
+.btn{display:inline-block;border:0;background:linear-gradient(180deg,#5b87ff,#3f68ee);box-shadow:0 10px 30px rgba(63,104,238,.45),inset 0 1px 0 rgba(255,255,255,.25);color:#fff;text-decoration:none;font:600 1rem "Inter",sans-serif;padding:15px 30px;border-radius:999px;cursor:pointer}
+.btn.g{background:rgba(255,255,255,.03);border:1px solid var(--line);box-shadow:none;color:var(--moon);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px)}
+.cta{display:flex;flex-wrap:wrap;gap:12px;justify-content:center}
+h2{font:600 clamp(1.6rem,6vw,2.2rem) "Inter Display","Inter",sans-serif;letter-spacing:-.02em;margin:0 0 22px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}
+.card{border:1px solid var(--line);border-radius:22px;background:var(--glass);padding:22px;-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px)}
+.card b{display:block;font:600 1.05rem "Inter Display","Inter",sans-serif;margin-bottom:6px}
+.card p{margin:0;color:var(--dim);font-size:.93rem}
+ol{padding-left:20px;color:var(--dim)}ol b{color:var(--moon);font-weight:600}
+.tabs{display:flex;gap:8px;margin-bottom:14px}
+.tab{border:1px solid var(--line);background:transparent;color:var(--dim);border-radius:999px;padding:10px 18px;font:500 .95rem "Inter",sans-serif;cursor:pointer}
+.tab[aria-selected=true]{color:var(--moon);border-color:rgba(160,185,255,.5);background:rgba(255,255,255,.04)}
+.pane[hidden]{display:none}
+footer{text-align:center;color:var(--dim);font-size:.82rem;padding:30px 22px 44px}
+@media (prefers-reduced-motion:reduce){*{animation:none!important}}
+.stars{display:none}
+body{background:radial-gradient(1.2px 1.2px at 8% 12%,rgba(255,255,255,.85),transparent),radial-gradient(1px 1px at 22% 38%,rgba(255,255,255,.6),transparent),radial-gradient(1.4px 1.4px at 35% 8%,rgba(255,255,255,.75),transparent),radial-gradient(1px 1px at 47% 27%,rgba(255,255,255,.5),transparent),radial-gradient(1.2px 1.2px at 63% 15%,rgba(255,255,255,.8),transparent),radial-gradient(1px 1px at 78% 33%,rgba(255,255,255,.55),transparent),radial-gradient(1.4px 1.4px at 91% 10%,rgba(255,255,255,.7),transparent),radial-gradient(1px 1px at 14% 62%,rgba(255,255,255,.5),transparent),radial-gradient(1.2px 1.2px at 40% 74%,rgba(255,255,255,.65),transparent),radial-gradient(1px 1px at 58% 58%,rgba(255,255,255,.45),transparent),radial-gradient(1.4px 1.4px at 74% 80%,rgba(255,255,255,.7),transparent),radial-gradient(1px 1px at 88% 66%,rgba(255,255,255,.5),transparent),radial-gradient(70% 38% at 50% -4%,rgba(62,230,180,.13),transparent 72%),radial-gradient(55% 30% at 100% 100%,rgba(255,26,60,.08),transparent 70%),#06070d!important}
+:root{--sys:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,"Helvetica Neue",system-ui,sans-serif}
+html,body,button,h1,h2,b,p,span,a{font-family:var(--sys)!important}
+.lw{width:min(58vw,240px)!important;filter:none!important}.lw img{animation:none!important}
+.wm b{font:600 clamp(1.5rem,7vw,2rem)!important;letter-spacing:-.01em!important;margin:0!important;text-transform:none!important}.wm b i{color:#3ee6b4}
+h1{font-weight:600!important;letter-spacing:-.02em!important}
+.btn{background:#3ee6b4!important;color:#04130e!important;font-weight:700!important;box-shadow:none!important;border-radius:12px!important;padding:15px 26px!important}
+.btn.g{background:#22242c!important;border:0!important;color:#fff!important}
+.card{background:#17181e!important;border:1px solid rgba(255,255,255,.09)!important;border-radius:14px!important;-webkit-backdrop-filter:none!important;backdrop-filter:none!important}
+.tab{border-radius:10px!important}
+</style>
+</head>
+<body>
+<div class="stars" aria-hidden="true"><i class="l1"></i><i class="l2"></i><i class="l3"></i></div>
+<main>
+<section class="hero">
+  <div class="lg"><div class="lw"><img src="logo-app.svg" alt="" width="220" height="220"></div>
+    <div class="wm"><b>space<i>SUITE</i></b></div></div>
+  <h1>Videollamadas privadas.</h1>
+  <p class="sub">Salas seguras, cara a cara, sin descargar nada de una tienda.</p>
+  <div class="cta"><a class="btn" href="app.html">Abrir spaceSUITE</a><button class="btn g" id="inst">Instalar en mi teléfono</button></div>
+</section>
+<section>
+  <h2>Hecho para verse y sentirse bien</h2>
+  <div class="grid">
+    <div class="card"><b>Salas privadas</b><p>Crea tu SUITE y comparte el enlace. Tú decides quién entra. Hasta 6 personas por sala.</p></div>
+    <div class="card"><b>Video y audio directos</b><p>La llamada viaja cifrada entre los dispositivos, sin pasar por un servidor de video.</p></div>
+    <div class="card"><b>Comparte tu pantalla</b><p>Muestra lo que quieras desde una computadora o tableta compatible.</p></div>
+    <div class="card"><b>Prueba gratis 3 días</b><p>Entra, crea tu sala y pruébala. Si te gusta, eliges tu acceso.</p></div>
+  </div>
+</section>
+<section id="instalar">
+  <h2>Instálala en segundos</h2>
+  <div class="tabs" role="tablist"><button class="tab" role="tab" aria-selected="true" data-t="ios">iPhone</button><button class="tab" role="tab" aria-selected="false" data-t="and">Android</button></div>
+  <div class="pane" id="p-ios"><ol><li>Abre esta página en <b>Safari</b>.</li><li>Toca <b>Compartir</b> (el cuadro con la flecha).</li><li>Elige <b>Añadir a pantalla de inicio</b>.</li><li>Abre <b>spaceSUITE</b> desde tu pantalla como cualquier app.</li></ol></div>
+  <div class="pane" id="p-and" hidden><ol><li>Abre esta página en <b>Chrome</b>.</li><li>Toca el botón <b>Instalar en mi teléfono</b> de arriba, o el menú ⋮ y <b>Instalar app</b>.</li><li>Abre <b>spaceSUITE</b> desde tu pantalla.</li></ol></div>
+  <p style="margin-top:26px"><a class="btn" href="app.html">Abrir spaceSUITE</a></p>
+</section>
+</main>
+<footer>spaceSUITE · Solo para hombres mayores de 18 años · Contacto por <a href="https://wa.me/522204341003" style="color:var(--dim)">WhatsApp</a></footer>
+<script>
+(function(){const S=Math.max(innerWidth,innerHeight)*1.2,mk=(n,a)=>Array.from({length:n},()=>`${(Math.random()*S)|0}px ${(Math.random()*S)|0}px 0 0 rgba(223,228,247,${(a*(.5+Math.random()*.5)).toFixed(2)})`).join(",");
+[["l1",90,.9],["l2",60,.8]].forEach(([c,n,a])=>document.querySelector("."+c).style.boxShadow=mk(n,a))})();
+document.querySelectorAll(".tab").forEach(b=>b.onclick=()=>{document.querySelectorAll(".tab").forEach(x=>x.setAttribute("aria-selected",x===b));["ios","and"].forEach(k=>document.getElementById("p-"+k).hidden=k!==b.dataset.t)});
+if(/android/i.test(navigator.userAgent))document.querySelector('[data-t="and"]').click();
+let dp=null;addEventListener("beforeinstallprompt",e=>{e.preventDefault();dp=e});
+document.getElementById("inst").onclick=async()=>{if(dp){dp.prompt();dp=null}else location.hash="instalar"};
+if("serviceWorker" in navigator&&location.protocol==="https:")navigator.serviceWorker.register("sw.js").catch(()=>{});
+</script>
+</body>
+</html>

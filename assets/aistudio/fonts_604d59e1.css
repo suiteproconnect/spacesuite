@@ -1,0 +1,7 @@
+/* Fuentes incluidas en el proyecto (Inter, licencia OFL): no dependen de internet ni de Google */
+@font-face{font-family:"Inter";font-weight:400;font-style:normal;font-display:swap;src:url(fonts/inter-400.woff) format("woff")}
+@font-face{font-family:"Inter";font-weight:500;font-style:normal;font-display:swap;src:url(fonts/inter-500.woff) format("woff")}
+@font-face{font-family:"Inter";font-weight:600;font-style:normal;font-display:swap;src:url(fonts/inter-600.woff) format("woff")}
+@font-face{font-family:"Inter";font-weight:700;font-style:normal;font-display:swap;src:url(fonts/inter-700.woff) format("woff")}
+@font-face{font-family:"Inter Display";font-weight:300;font-style:normal;font-display:swap;src:url(fonts/interd-300.woff) format("woff")}
+@font-face{font-family:"Inter Display";font-weight:600;font-style:normal;font-display:swap;src:url(fonts/interd-600.woff) format("woff")}

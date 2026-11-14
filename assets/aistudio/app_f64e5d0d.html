@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#02030a">
+<meta name="referrer" content="no-referrer">
+<title>spaceSUITE · Sala</title>
+<link rel="preload" href="fonts/inter-500.woff" as="font" type="font/woff" crossorigin>
+<link rel="stylesheet" href="fonts.css">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="v2.css">
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js" defer></script>
+<style>#splash{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:#0d0e12}body:not(.boot) #splash{display:none}body.boot>*:not(#splash):not(script){visibility:hidden!important}#splash img{border-radius:28px}</style></head>
+<body class="rd boot"><div id="splash" aria-hidden="true"><img src="logo-app.svg" alt="" width="120" height="120"></div>
+<noscript><p style="padding:24px;color:#fff">Esta app necesita JavaScript.</p></noscript>
+<div class="stars" aria-hidden="true"><i class="l1"></i><i class="l2"></i><i class="l3"></i></div>
+<section id="grid" aria-label="Participantes"></section>
+<main class="main" id="main" aria-live="polite"><div class="lay" id="la"></div><div class="lay" id="lb"></div><div class="vig"></div></main>
+<section class="gal" id="gal" aria-label="Participantes"></section>
+<div class="dots" id="dots" aria-hidden="true"></div>
+<section class="deck" id="deck" aria-label="Pantalla compartida"></section>
+<div class="who" id="who"></div>
+<div class="sats" id="sats"></div>
+<div class="me c-tr" id="me"><video id="vid" autoplay muted playsinline></video><span id="ini">T</span><i class="hb" id="hb"></i></div>
+<div class="pill" id="pill"></div>
+<div class="cap" id="cap" role="status"></div>
+<section id="empty" aria-live="polite"><div><b>Tu sala está lista</b><span>Invita a alguien para empezar.</span></div><button type="button" id="eInv">Invitar</button></section>
+<div id="note" role="status" aria-live="polite"></div>
+<div id="wait" role="alertdialog" aria-live="polite"></div>
+<div class="ui show" id="ui">
+  <div class="top">
+    <img class="tlg" src="logo-app.svg" alt="" width="48" height="48">
+    <div class="tt"><h1>spaceSUITE<span class="role" id="role"></span></h1>
+    <p><span id="lk"></span><i class="dot"></i><span id="online">1 en línea</span> · <span id="clock">00:00</span><span class="rtx" id="rtx" hidden>· Grabando</span></p></div>
+    <div class="tops">
+      <button class="orb sm pl" id="tPe" aria-label="Participantes" title="Participantes"></button>
+      <button class="orb sm" id="tIn" aria-label="Invitar a la sala" title="Invitar a la sala"></button>
+      <button class="orb sm" id="tSn" aria-pressed="false" aria-label="Modo silencio" title="Sonidos y avisos"></button>
+      <button class="orb sm" id="tMe" aria-label="Mi cuenta" title="Mi cuenta"></button>
+      <button class="orb sm" id="tVw" aria-label="Vista" title="Vista" hidden></button>
+      <button class="orb sm" id="tFl" aria-pressed="false" aria-label="Mi cámara flotante" hidden></button>
+      <button class="orb sm" id="tSu" aria-pressed="true" aria-label="Traducción en vivo" hidden></button>
+      <button class="orb sm" id="tFi" aria-pressed="false" aria-label="Ver imagen completa" hidden></button>
+      <button class="orb sm" id="tGa" aria-label="Volver a todos los participantes" hidden></button>
+      <button class="orb sm" id="tAd" aria-label="Panel de dueño" hidden></button>
+    </div>
+  </div>
+  <button class="orb sm pr" id="tPr" aria-label="Herramientas de prueba" title="Herramientas de prueba"></button>
+  <div class="ctl" id="dock"></div>
+</div>
+<div class="status" id="status" aria-hidden="true"><span id="sm"></span><span id="sc"></span><span id="rc"><i class="rdot" style="display:block"></i></span></div>
+<div class="hint"></div>
+<div id="modal"><div class="veil" id="veil"></div>
+  <section class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sh">
+    <button class="orb sm x" id="bX" aria-label="Cerrar"></button>
+    <h2 id="sh"></h2><p id="sp"></p><div id="sf"></div>
+  </section>
+  <section class="pk" id="pk" role="dialog" aria-modal="true" aria-label="Vista rápida">
+    <div class="pv" id="pv"></div>
+    <div class="pm"><div><b id="pn"></b><span id="pc"></span></div><div class="a"><button class="orb wv" id="pkWv" aria-label="Enviar una onda" title="Enviar una onda"></button><button class="orb star" id="pkGo" aria-label="Ver en pantalla completa" title="Ver en pantalla completa"></button><button class="orb" id="pkX" aria-label="Cerrar"></button></div></div>
+  </section>
+</div>
+<div id="chatp"><div id="ctabs"></div><div class="msgs" id="msgs" aria-live="polite"></div><form class="cb" id="cb" autocomplete="off"><input id="ci" placeholder="Mensaje para toda la sala" enterkeyhint="send" maxlength="500" aria-label="Mensaje"><button type="submit" class="orb sm" id="cs" aria-label="Enviar"></button></form></div>
+<div class="glow" id="glow" aria-hidden="true"></div>
+<section class="inc" id="inc" role="alertdialog" aria-label="Invitación entrante"><div class="ic" id="ic"></div><div class="it"><b id="itn"></b><span id="its"></span></div><div class="ia"><button class="orb sm star" id="iOk" aria-label="Aceptar" title="Aceptar"></button><button class="orb sm" id="iNo" aria-label="Ignorar" title="Ignorar"></button><button class="orb sm" id="iBk" aria-label="Bloquear" title="Bloquear"></button></div></section>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div id="tour" role="dialog" aria-modal="true" aria-label="Bienvenida" hidden></div>
+<div class="end" id="end" hidden><img src="logo-app.svg" alt="" width="104" height="104"><h2>Hasta pronto</h2><p id="dur"></p><div class="bs"><button class="tr-b" id="rejoin" type="button">Volver a entrar</button><button class="tr-b" id="mine" type="button">Iniciar mi propia SUITE</button><button class="tr-b" id="reg2" type="button">Crear mi cuenta</button><button class="tr-g" id="home" type="button">Ir al inicio</button></div></div>
+<script src="app.js" defer></script>
+</body>
+</html>
