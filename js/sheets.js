@@ -9,22 +9,36 @@ import {
   iconClose,
   iconFit,
   iconGrid,
+  iconHeartbeat,
   iconLeave,
   iconLock,
   iconMic,
   iconMuteAll,
   iconPip,
+  iconReaction,
   iconSend,
   iconSettings,
   iconShare,
   iconShareTarget,
   iconShield,
+  iconSpatialAudio,
+  iconSubtitles,
+  iconSuperKey,
   iconSwap,
+  iconUserPlus,
   iconUsers,
   iconWave,
+  playSpatialHeartbeatSound,
   renderLinkedTextHtml,
 } from './icons.js';
-import { ACCENT_TOKENS } from './identity.js';
+import {
+  DIGITAL_PERKS,
+  addLatidos,
+  deductLatidos,
+  getLatidosBalance,
+  getPurchasedPerks,
+  unlockPerk,
+} from './identity.js';
 
 const SHARE_TARGETS = [
   { key: 'native', label: 'Compartir' },
@@ -46,13 +60,13 @@ export function renderShareSheetHtml(opts) {
         ${iconClose()}
       </button>
       <h2 id="sh">${isApp ? 'Compartir spaceSUITE' : 'Invitar a tu SUITE'}</h2>
-      <p id="sp">${isApp ? 'Manda el enlace de la app a quien quieras.' : 'Cada persona espera tu aprobación para entrar.'}</p>
+      <p id="sp">${isApp ? 'Manda el enlace de la app a quien quieras.' : 'Quien llegue verá SPACE y decidirá si quiere entrar.'}</p>
       <div id="sf">
         ${
           isApp
             ? `<div class="kv"><span>Enlace</span><b>${esc(hostDisplay)}</b></div>`
             : `<div class="kv"><span>Código de SUITE</span><b>${esc(opts.code)}</b></div>
-               <div class="kv"><span>Clave</span><b>${esc(opts.pass || 'Libre')}</b></div>`
+               ${opts.pass ? `<div class="kv"><span>Clave</span><b>${esc(opts.pass)}</b></div>` : ''}`
         }
         <div class="shr">
           ${SHARE_TARGETS.map(
@@ -65,11 +79,11 @@ export function renderShareSheetHtml(opts) {
         </div>
         <div class="row2">
           <button type="button" data-act="copy-link">Copiar enlace</button>
-          ${!isApp ? `<button type="button" data-act="copy-cred">Copiar código y clave</button>` : ''}
+          ${!isApp ? `<button type="button" data-act="copy-cred">Copiar código</button>` : ''}
         </div>
         ${
           !isApp
-            ? `<p>El enlace entra directo con la clave. Si prefieres, comparte solo el código y la clave por separado.</p>
+            ? `<p>El enlace abre SPACE directamente. También puedes compartir solo el código de 6 caracteres.</p>
                <div class="row2">
                  ${opts.hasSwitchApp ? `<button type="button" data-act="switch-app">Compartir la app</button>` : ''}
                  ${opts.hasOpenInstall ? `<button type="button" data-act="open-install">Instalar la app</button>` : ''}
@@ -85,8 +99,8 @@ export function bindShareSheetEvents(container, opts) {
   const isApp = opts.mode === 'shareapp';
   const buildMsg = () =>
     isApp
-      ? `Instala spaceSUITE: videollamadas privadas 🔒\n${opts.link}`
-      : `Te invito a mi SUITE en spaceSUITE 🔒\nCódigo: ${opts.code}\nClave: ${opts.pass || '—'}\nEntra directo: ${opts.link}`;
+      ? `Instala spaceSUITE: videollamadas privadas\n${opts.link}`
+      : `Te invito a mi Suite en spaceSUITE\nCódigo: ${opts.code}\nEntra directo: ${opts.link}`;
 
   const copyText = async (text) => {
     try {
@@ -127,13 +141,13 @@ export function bindShareSheetEvents(container, opts) {
         openExternal('https://wa.me/?text=' + E(msg));
       } else if (key === 'tg') {
         const tgText = isApp
-          ? 'Instala spaceSUITE 🔒'
-          : `Te invito a mi SUITE en spaceSUITE 🔒\nCódigo: ${opts.code}\nClave: ${opts.pass || '—'}`;
+          ? 'Instala spaceSUITE'
+          : `Te invito a mi SUITE en spaceSUITE\nCódigo: ${opts.code}\nClave: ${opts.pass || '—'}`;
         openExternal(`https://t.me/share/url?url=${E(opts.link)}&text=${E(tgText)}`);
       } else if (key === 'x') {
         openExternal(
           `https://twitter.com/intent/tweet?text=${E(
-            `${isApp ? 'Instala spaceSUITE' : 'Te invito a mi SUITE en spaceSUITE'} 🔒 ${opts.link}`,
+            `${isApp ? 'Instala spaceSUITE' : 'Te invito a mi SUITE en spaceSUITE'} ${opts.link}`,
           )}`,
         );
       } else if (key === 'gm') {
@@ -191,6 +205,8 @@ export class AdminPanelController {
     this.loading = true;
     this.error = null;
     this.busyKey = null;
+    this.createOpen = false;
+    this.createForm = { name: '', email: '', password: '', role: 'admin' };
     this._mounted = true;
 
     this._renderShell();
@@ -206,7 +222,7 @@ export class AdminPanelController {
 
   async fetchMetrics() {
     if (!this.user?.token) {
-      this.error = 'Sesión sin token de administrador.';
+      this.error = 'Sesión sin token de acceso principal.';
       this.loading = false;
       this._renderContent();
       return;
@@ -290,11 +306,53 @@ export class AdminPanelController {
     }
   }
 
+  async handleCreateUser() {
+    if (!this.user?.token) return;
+    const { name, email, password, role } = this.createForm;
+    if (name.trim().length < 2) return this.onToast('Escribe el nombre (mínimo 2 letras)');
+    if (!/^\S+@\S+\.\S+$/.test(email.trim())) return this.onToast('Escribe un correo válido');
+    if (password.length < 8 || !/[A-Za-z]/.test(password) || !/\d/.test(password)) {
+      return this.onToast('La contraseña requiere 8+ caracteres con letras y números');
+    }
+
+    this.busyKey = 'create-user';
+    this._renderContent();
+    try {
+      const res = await fetch('/api/admin/users/create', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.user.token}`,
+        },
+        body: JSON.stringify({
+          name: name.trim(),
+          email: email.trim(),
+          password,
+          role,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        this.onToast(json.error || 'No se pudo crear la cuenta');
+      } else {
+        this.onToast(`Cuenta ${role === 'admin' ? 'Principal' : 'Estándar'} creada`);
+        this.createForm = { name: '', email: '', password: '', role: 'admin' };
+        this.createOpen = false;
+        await this.fetchMetrics();
+      }
+    } catch {
+      this.onToast('Error de conexión');
+    } finally {
+      this.busyKey = null;
+      this._renderContent();
+    }
+  }
+
   _renderShell() {
     this.mountEl.innerHTML = `
       <section class="sheet admin-sheet" role="dialog" aria-modal="true" aria-labelledby="sh">
         <button type="button" class="orb sm x" data-adm="close" aria-label="Cerrar">${iconClose()}</button>
-        <h2 id="sh">Panel Admin Pro</h2>
+        <h2 id="sh">Panel de Control</h2>
         <p id="sp">Métricas en vivo · Cloudflare Pages Edge</p>
         <div id="admin-kpis"></div>
         <div class="admin-tabs" role="tablist" id="admin-tabs"></div>
@@ -349,13 +407,13 @@ export class AdminPanelController {
                 <div class="admin-card-head">
                   <div>
                     <b>${esc(r.code)}</b>
-                    <small>Anfitrión: ${esc(r.hostName)} · ${r.participants} en línea${r.waiting > 0 ? ` · ${r.waiting} en espera` : ''} · ${r.messagesCount} msg</small>
+                    <small>Creador: ${esc(r.hostName)} · ${r.participants} en línea${r.waiting > 0 ? ` · ${r.waiting} en espera` : ''} · ${r.messagesCount} msg</small>
                   </div>
                   <span class="admin-badge ${r.locked ? 'warn' : 'ok'}">${r.locked ? 'Bloqueada' : 'Abierta'}</span>
                 </div>
                 <div class="admin-actions">
-                  <button type="button" class="orb sm ${r.locked ? 'active-mint' : ''}" ${dis} data-room-act="lock" data-code="${esc(r.code)}" data-val="${!r.locked}" title="${r.locked ? 'Abrir sala' : 'Bloquear sala'}">${iconLock(!r.locked)}</button>
-                  <button type="button" class="orb sm ${r.waitingRoom ? 'active-mint' : ''}" ${dis} data-room-act="waitingRoom" data-code="${esc(r.code)}" data-val="${!r.waitingRoom}" title="Alternar sala de espera">${iconShield()}</button>
+                  <button type="button" class="orb sm ${r.locked ? 'is-active' : ''}" ${dis} data-room-act="lock" data-code="${esc(r.code)}" data-val="${!r.locked}" title="${r.locked ? 'Abrir sala' : 'Bloquear sala'}">${iconLock(!r.locked)}</button>
+                  <button type="button" class="orb sm ${r.waitingRoom ? 'is-active' : ''}" ${dis} data-room-act="waitingRoom" data-code="${esc(r.code)}" data-val="${!r.waitingRoom}" title="Alternar recibidor SPACE">${iconShield()}</button>
                   <button type="button" class="orb sm" ${dis} data-room-act="muteAll" data-code="${esc(r.code)}" title="Silenciar sala">${iconMuteAll()}</button>
                   <button type="button" class="orb sm rm" ${dis} data-room-act="endRoom" data-code="${esc(r.code)}" title="Cerrar sala">${iconLeave()}</button>
                 </div>
@@ -363,21 +421,40 @@ export class AdminPanelController {
               )
               .join('');
     } else if (d && this.tab === 'users') {
-      bodyEl.innerHTML = d.users
-        .map((u) => {
-          const isSelf = u.email.toLowerCase() === (this.user.email || '').toLowerCase();
-          return `
-            <div class="row">
-              <i class="av">${esc((u.name || 'U').charAt(0).toUpperCase())}</i>
-              <span>
-                <b>${esc(u.name)} <span class="admin-badge ${u.role === 'admin' ? 'ok' : ''}">${u.role === 'admin' ? 'Admin' : 'Usuario'}</span></b>
-                <small>${esc(u.email)} · ${u.verified ? 'Verificado' : 'Pendiente'} · ${esc(u.suiteCode)}</small>
-              </span>
-              ${!u.verified ? `<button type="button" class="orb sm" ${dis} data-user-verify="${esc(u.email)}" title="Verificar manualmente">${iconCheck()}</button>` : ''}
-              ${!isSelf ? `<button type="button" class="orb sm ${u.role === 'admin' ? 'active-mint' : ''}" ${dis} data-user-role="${esc(u.email)}" data-next-role="${u.role === 'admin' ? 'user' : 'admin'}" title="${u.role === 'admin' ? 'Cambiar a usuario' : 'Promover a admin'}">${iconUsers()}</button>` : ''}
-            </div>`;
-        })
-        .join('');
+      const cf = this.createForm;
+      const createHtml = this.createOpen
+        ? `<form id="adm-create-form" class="adm-create-box">
+            <input type="text" maxlength="24" placeholder="Nombre o alias" data-adm-field="name" value="${esc(cf.name)}" />
+            <input type="email" maxlength="120" placeholder="Correo electrónico" data-adm-field="email" value="${esc(cf.email)}" />
+            <input type="text" maxlength="200" placeholder="Contraseña (8+, letras y números)" data-adm-field="password" value="${esc(cf.password)}" />
+            <select data-adm-field="role">
+              <option value="admin" ${cf.role === 'admin' ? 'selected' : ''}>Acceso Principal (Control total)</option>
+              <option value="user" ${cf.role === 'user' ? 'selected' : ''}>Acceso Estándar</option>
+            </select>
+            <div class="adm-create-acts">
+              <button type="submit" class="tr-b" style="min-height:38px" ${dis}>Crear cuenta</button>
+              <button type="button" class="tr-g" style="min-height:38px" data-adm="cancel-create">Cancelar</button>
+            </div>
+          </form>`
+        : `<button type="button" class="adm-create-toggle" data-adm="open-create">${iconUserPlus()}<span>Crear cuenta o acceso principal</span></button>`;
+
+      bodyEl.innerHTML =
+        createHtml +
+        d.users
+          .map((u) => {
+            const isSelf = u.email.toLowerCase() === (this.user.email || '').toLowerCase();
+            return `
+              <div class="row">
+                <i class="av">${esc((u.name || 'U').charAt(0).toUpperCase())}</i>
+                <span>
+                  <b>${esc(u.name)} <span class="admin-badge ${u.role === 'admin' ? 'ok' : ''}">${u.role === 'admin' ? 'Principal' : 'Usuario'}</span></b>
+                  <small>${esc(u.email)} · ${u.verified ? 'Verificado' : 'Pendiente'} · ${esc(u.suiteCode)}</small>
+                </span>
+                ${!u.verified ? `<button type="button" class="orb sm" ${dis} data-user-verify="${esc(u.email)}" title="Verificar manualmente">${iconCheck()}</button>` : ''}
+                ${!isSelf ? `<button type="button" class="orb sm ${u.role === 'admin' ? 'is-active' : ''}" ${dis} data-user-role="${esc(u.email)}" data-next-role="${u.role === 'admin' ? 'user' : 'admin'}" title="${u.role === 'admin' ? 'Cambiar a estándar' : 'Dar acceso principal'}">${iconUsers()}</button>` : ''}
+              </div>`;
+          })
+          .join('');
     } else if (d && this.tab === 'audit') {
       bodyEl.innerHTML =
         d.audit.length === 0
@@ -398,12 +475,33 @@ export class AdminPanelController {
   }
 
   _bindEvents() {
+    this.mountEl.addEventListener('input', (e) => {
+      const field = e.target.getAttribute?.('data-adm-field');
+      if (field) this.createForm[field] = e.target.value;
+    });
+    this.mountEl.addEventListener('change', (e) => {
+      const field = e.target.getAttribute?.('data-adm-field');
+      if (field) this.createForm[field] = e.target.value;
+    });
+    this.mountEl.addEventListener('submit', (e) => {
+      if (e.target.id === 'adm-create-form') {
+        e.preventDefault();
+        this.handleCreateUser();
+      }
+    });
     this.mountEl.addEventListener('click', (e) => {
       const admBtn = e.target.closest('[data-adm]');
       if (admBtn) {
         const a = admBtn.getAttribute('data-adm');
         if (a === 'close') this.onClose();
         else if (a === 'refresh') this.fetchMetrics();
+        else if (a === 'open-create') {
+          this.createOpen = true;
+          this._renderContent();
+        } else if (a === 'cancel-create') {
+          this.createOpen = false;
+          this._renderContent();
+        }
         return;
       }
       const tabBtn = e.target.closest('[data-adm-tab]');
@@ -460,7 +558,7 @@ export class ChatHudController {
     this.messages = [];
     this.typingPeers = [];
     this.chatTarget = null;
-    this.settings = { opacity: 45, fontSize: 'md', soundEnabled: true, toastEnabled: true, accent: 'emerald' };
+    this.settings = { opacity: 85, fontSize: 'md', soundEnabled: true, toastEnabled: true, accent: 'obsidian' };
 
     this.settingsOpen = false;
     this.tabUnread = {};
@@ -492,7 +590,6 @@ export class ChatHudController {
           <div id="ctabs"></div>
           <div class="chat-head-acts">
             <button type="button" class="orb sm chat-icon-btn" id="chat-cfg-btn" aria-label="Ajustes del chat" title="Ajustes del chat">${iconSettings()}</button>
-            <button type="button" class="orb sm chat-icon-btn" id="chat-cls-btn" aria-label="Cerrar chat">${iconClose()}</button>
           </div>
         </div>
         <div id="chat-settings-box" class="chat-settings" role="region" aria-label="Ajustes del chat" hidden></div>
@@ -514,7 +611,6 @@ export class ChatHudController {
     this.hudEl = this.mountEl.querySelector('#chatp');
     this.tabsEl = this.mountEl.querySelector('#ctabs');
     this.cfgBtn = this.mountEl.querySelector('#chat-cfg-btn');
-    this.clsBtn = this.mountEl.querySelector('#chat-cls-btn');
     this.settingsBox = this.mountEl.querySelector('#chat-settings-box');
     this.bodyBox = this.mountEl.querySelector('#chat-body-box');
     this.msgsEl = this.mountEl.querySelector('#msgs');
@@ -524,7 +620,6 @@ export class ChatHudController {
     this.formEl = this.mountEl.querySelector('#cb');
     this.inputEl = this.mountEl.querySelector('#ci');
 
-    this.clsBtn.addEventListener('click', () => this.onClose());
     this.cfgBtn.addEventListener('click', () => {
       this.settingsOpen = !this.settingsOpen;
       this._renderSettingsBox();
@@ -580,6 +675,12 @@ export class ChatHudController {
       this.onSend(trimmed, this.chatTarget);
       this.onTyping(false, this.chatTarget);
       this.inputEl.value = '';
+      this.isNearBottom = true;
+      this.showNewBelow = false;
+      this.jumpBtn.hidden = true;
+      requestAnimationFrame(() => {
+        this.msgsEl.scrollTo({ top: this.msgsEl.scrollHeight, behavior: 'smooth' });
+      });
     });
 
     this.settingsBox.addEventListener('input', (e) => {
@@ -600,33 +701,30 @@ export class ChatHudController {
       const fsBtn = e.target.closest('[data-cs-fs]');
       if (fsBtn) {
         this.onUpdateSettings({ ...this.settings, fontSize: fsBtn.getAttribute('data-cs-fs') });
-        return;
-      }
-      const acBtn = e.target.closest('[data-cs-acc]');
-      if (acBtn) {
-        this.onUpdateSettings({ ...this.settings, accent: acBtn.getAttribute('data-cs-acc') });
       }
     });
   }
 
   _applyHudStyle() {
-    const accent = ACCENT_TOKENS[this.settings.accent] || ACCENT_TOKENS.emerald;
-    const alpha = (this.settings.opacity / 100).toFixed(2);
+    const alpha = Math.max(0.84, this.settings.opacity / 100).toFixed(2);
     const fontSizeCss =
-      this.settings.fontSize === 'sm' ? '0.82rem' : this.settings.fontSize === 'lg' ? '1.08rem' : '0.94rem';
+      this.settings.fontSize === 'sm' ? '0.84rem' : this.settings.fontSize === 'lg' ? '1.08rem' : '0.94rem';
 
-    this.hudEl.style.background = `rgba(10, 15, 20, ${alpha})`;
-    this.hudEl.style.bottom = this.kbInset > 0 ? `${this.kbInset + 10}px` : '';
-    this.hudEl.style.maxHeight = this.vvHeight
-      ? `${Math.max(200, Math.min(this.vvHeight * 0.54, 420))}px`
-      : '';
-    this.hudEl.style.setProperty('--chat-bubble-bg', accent.bg);
-    this.hudEl.style.setProperty('--chat-bubble-border', accent.border);
+    this.hudEl.style.background = `rgba(11, 22, 46, ${alpha})`;
+    if (this.kbInset > 0) {
+      this.hudEl.style.top = 'auto';
+      this.hudEl.style.bottom = `${this.kbInset + 6}px`;
+      this.hudEl.style.maxHeight = this.vvHeight ? `${Math.max(180, this.vvHeight - 76)}px` : '58dvh';
+    } else {
+      this.hudEl.style.top = '';
+      this.hudEl.style.bottom = '';
+      this.hudEl.style.maxHeight = '';
+    }
     this.hudEl.style.setProperty('--chat-msg-size', fontSizeCss);
   }
 
   _renderSettingsBox() {
-    this.cfgBtn.classList.toggle('active-mint', this.settingsOpen);
+    this.cfgBtn.classList.toggle('is-active', this.settingsOpen);
     this.settingsBox.hidden = !this.settingsOpen;
     this.bodyBox.style.display = this.settingsOpen ? 'none' : 'flex';
     if (!this.settingsOpen) return;
@@ -634,7 +732,7 @@ export class ChatHudController {
     this.settingsBox.innerHTML = `
       <div class="cs-row">
         <div class="cs-label"><b>Transparencia</b><span>${this.settings.opacity}%</span></div>
-        <input type="range" min="20" max="85" step="5" value="${this.settings.opacity}" class="cs-slider" data-cs-opacity aria-label="Transparencia del fondo" />
+        <input type="range" min="40" max="96" step="4" value="${this.settings.opacity}" class="cs-slider" data-cs-opacity aria-label="Transparencia del fondo" />
       </div>
       <div class="cs-row">
         <div class="cs-label"><b>Tamaño de texto</b></div>
@@ -648,17 +746,6 @@ export class ChatHudController {
               ([k, lbl]) =>
                 `<button type="button" class="${this.settings.fontSize === k ? 'on' : ''}" data-cs-fs="${k}">${lbl}</button>`,
             )
-            .join('')}
-        </div>
-      </div>
-      <div class="cs-row">
-        <div class="cs-label"><b>Color de tus burbujas</b></div>
-        <div class="cs-accents">
-          ${Object.keys(ACCENT_TOKENS)
-            .map((k) => {
-              const tok = ACCENT_TOKENS[k];
-              return `<button type="button" class="cs-swatch ${this.settings.accent === k ? 'on' : ''}" data-cs-acc="${k}"><i style="background:${tok.swatch}"></i><span>${tok.label}</span></button>`;
-            })
             .join('')}
         </div>
       </div>
@@ -799,9 +886,20 @@ export class ChatHudController {
         this.msgsEl.innerHTML = visibleMessages
           .map((m) => {
             const isSelf = m.fromPeerId === this.selfPeerId;
-            return `<div class="msg ${isSelf ? 'me' : ''}"><small>${
-              isSelf ? 'Tú' : esc(m.fromName)
-            } · ${esc(formatMessageTime(m.timestamp))}</small><span>${renderLinkedTextHtml(m.text)}</span></div>`;
+            const timeStr = formatMessageTime(m.timestamp);
+            const statusHtml = isSelf
+              ? `<span class="msg-status-badge">✓ ${esc(m.status || 'Enviado')}</span>`
+              : '';
+            return `
+              <div class="msg ${isSelf ? 'me' : ''}">
+                <small>
+                  <span class="msg-sender-name">${isSelf ? 'Tú' : esc(m.fromName)}</span>
+                  <span class="msg-time">${esc(timeStr)}</span>
+                  ${statusHtml}
+                </small>
+                <span>${renderLinkedTextHtml(m.text)}</span>
+              </div>
+            `;
           })
           .join('');
       }
@@ -881,7 +979,7 @@ export function renderRoomSheetHtml(sheet, ctx) {
                   <i class="av" style="background:${getPeerTint(p.peerId)}">${esc(p.initial)}</i>
                   <span>
                     <b>${isMe ? 'Tú' : esc(p.name)}</b>
-                    <small>${p.role === 'host' ? 'Anfitrión' : 'En línea'}${p.handRaised ? ' · Mano levantada' : ''}</small>
+                    <small>${p.role === 'host' ? 'Creador' : 'En línea'}${p.handRaised ? ' · Mano levantada' : ''}</small>
                   </span>
                   ${!isMe ? `<button type="button" class="orb sm" data-dm="${esc(p.peerId)}" aria-label="Chat privado con ${esc(p.name)}">${iconChat()}</button>` : ''}
                   ${
@@ -909,25 +1007,25 @@ export function renderRoomSheetHtml(sheet, ctx) {
         <div id="sf">
           <div class="row">
             <span><b>Todos juntos</b><small>Cuadrícula adaptable (4 por página en grupos)</small></span>
-            <button type="button" class="orb sm ${effectiveMode === 'grid' ? 'active-mint' : ''}" data-view="grid">${iconGrid()}</button>
+            <button type="button" class="orb sm ${effectiveMode === 'grid' ? 'is-active' : ''}" data-view="grid">${iconGrid()}</button>
           </div>
           <div class="row">
             <span><b>Mi cámara flotante</b><small>Modo 1:1 Pro con PiP en cualquier esquina</small></span>
-            <button type="button" class="orb sm ${effectiveMode === 'stage-pip' ? 'active-mint' : ''}" data-view="pip">${iconPip()}</button>
+            <button type="button" class="orb sm ${effectiveMode === 'stage-pip' ? 'is-active' : ''}" data-view="pip">${iconPip()}</button>
           </div>
           <div class="row">
             <span><b>Imagen completa</b><small>Ver cámara completa sin recortar</small></span>
-            <button type="button" class="orb sm ${viewMode === 'fullscreen' || fitContain ? 'active-mint' : ''}" data-view="full">${iconFit()}</button>
+            <button type="button" class="orb sm ${viewMode === 'fullscreen' || fitContain ? 'is-active' : ''}" data-view="full">${iconFit()}</button>
           </div>
           <div class="row">
             <span><b>Intercambiar cámaras</b><small>Alterna entre tu cámara y el invitado</small></span>
-            <button type="button" class="orb sm active-mint" data-view="swap">${iconSwap()}</button>
+            <button type="button" class="orb sm is-active" data-view="swap">${iconSwap()}</button>
           </div>
           ${
             canDisplay
               ? `<div class="row">
                   <span><b>Compartir mi pantalla</b><small>Pantalla completa, una ventana o una pestaña</small></span>
-                  <button type="button" class="orb sm ${screenSharing ? 'active-mint' : ''}" data-view="screen">${iconShare()}</button>
+                  <button type="button" class="orb sm ${screenSharing ? 'is-active' : ''}" data-view="screen">${iconShare()}</button>
                 </div>`
               : ''
           }
@@ -948,7 +1046,7 @@ export function renderRoomSheetHtml(sheet, ctx) {
       <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh">
         <button type="button" class="orb sm x" data-act="close" aria-label="Cerrar">${iconClose()}</button>
         <h2 id="sh">Sala</h2>
-        <p id="sp">Solo el anfitrión ve esto.</p>
+        <p id="sp">Solo quien abrió la Suite ve esto.</p>
         <div id="sf">
           <div class="row">
             <span><b>Silenciar a todos</b><small>Los participantes pueden volver a activarse</small></span>
@@ -956,14 +1054,14 @@ export function renderRoomSheetHtml(sheet, ctx) {
           </div>
           <div class="row">
             <span><b>Bloquear la sala</b><small>Nadie más puede entrar</small></span>
-            <button type="button" class="orb sm ${locked ? 'active-mint' : ''}" data-mod="lock">${iconLock(!locked)}</button>
+            <button type="button" class="orb sm ${locked ? 'is-active' : ''}" data-mod="lock">${iconLock(!locked)}</button>
           </div>
           <div class="row">
             <span><b>Sala de espera</b><small>Aprobar manualmente a cada invitado</small></span>
-            <button type="button" class="orb sm ${waitingRoom ? 'active-mint' : ''}" data-mod="waitingRoom">${iconShield()}</button>
+            <button type="button" class="orb sm ${waitingRoom ? 'is-active' : ''}" data-mod="waitingRoom">${iconShield()}</button>
           </div>
           <div class="row">
-            <span><b style="color:var(--danger)">Terminar sala para todos</b><small>Saca a todos y cierra la sala</small></span>
+            <span><b class="text-danger">Terminar sala para todos</b><small>Saca a todos y cierra la sala</small></span>
             <button type="button" class="orb sm rm ${endRoomArmed ? 'arm' : ''}" data-mod="endRoom">${iconLeave()}</button>
           </div>
         </div>
@@ -978,7 +1076,7 @@ export function renderRoomSheetHtml(sheet, ctx) {
       <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh">
         <button type="button" class="orb sm x" data-act="close" aria-label="Cerrar">${iconClose()}</button>
         <h2 id="sh">${esc(self?.name || 'Mi cuenta')}</h2>
-        <p id="sp">${esc(user?.plan || (self?.role === 'host' ? 'Anfitrión' : 'Invitado'))}</p>
+        <p id="sp">${esc(user?.plan || (self?.role === 'host' ? 'Creador' : 'Invitado'))}</p>
         <div id="sf">
           <div class="row">
             <span>
@@ -991,9 +1089,9 @@ export function renderRoomSheetHtml(sheet, ctx) {
           </div>
           ${
             editingName
-              ? `<form id="room-name-form" style="display:flex;gap:8px;margin-top:4px;margin-bottom:8px">
-                  <input id="room-draft-name" type="text" maxlength="24" value="${esc(draftName)}" placeholder="Tu nombre" style="flex:1;min-width:0;padding:10px 12px;border-radius:12px;border:1px solid var(--ln);background:var(--s2);color:var(--moon);font:500 0.92rem var(--sys);outline:none" />
-                  <button type="submit" style="padding:0 14px;border-radius:12px;border:0;background:var(--green);color:var(--ink);font:600 0.88rem var(--sys);cursor:pointer">Guardar</button>
+              ? `<form id="room-name-form" class="inline-name-form">
+                  <input id="room-draft-name" type="text" maxlength="24" value="${esc(draftName)}" placeholder="Tu nombre" />
+                  <button type="submit" class="tr-b inline-save-btn">Guardar</button>
                 </form>`
               : ''
           }
@@ -1008,6 +1106,102 @@ export function renderRoomSheetHtml(sheet, ctx) {
         </div>
       </section>
     `;
+  }
+
+  if (sheet === 'suite') {
+    const { self, user, silentMode, waitingCount, isRoomFull, pushState } = ctx;
+    const isHost = self?.role === 'host';
+    const isAdmin = user?.role === 'admin';
+    const pushSupported = pushState ? pushState.supported : true;
+    const pushActive = Boolean(pushState?.subscribed);
+    const pushDiscrete = pushState?.discrete !== false;
+    return `
+      <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh">
+        <button type="button" class="orb sm x" data-act="close" aria-label="Cerrar">${iconClose()}</button>
+        <h2 id="sh">Suite y controles</h2>
+        <p id="sp">${esc(self?.name || 'Invitado')} · ${isHost ? 'Creador' : 'Participante'}</p>
+        <div id="sf">
+          <div class="row">
+            <span><b>Invitar a la sala</b><small>${isRoomFull ? 'Capacidad máxima alcanzada' : 'Comparte enlace o código directo'}</small></span>
+            <button type="button" class="orb sm is-active" ${isRoomFull ? 'disabled' : ''} data-act="open-invite">${iconShare()}</button>
+          </div>
+          ${
+            isHost
+              ? `<div class="row">
+                  <span><b>Personalizar recibidor SPACE</b><small>Portada, video corto en loop, título y descripción</small></span>
+                  <button type="button" class="orb sm" data-act="open-space-config">${iconCam()}</button>
+                </div>`
+              : ''
+          }
+          <div class="row">
+            <span><b>Sonidos y avisos</b><small>${silentMode ? 'Silenciados en esta sala' : 'Activados'}</small></span>
+            <button type="button" class="orb sm ${!silentMode ? 'is-active' : ''}" data-act="toggle-silent">${iconBell(silentMode)}</button>
+          </div>
+          <div class="row">
+            <span><b>Notificaciones (OneSignal)</b><small>${
+              !pushSupported
+                ? 'No disponible en este navegador'
+                : pushActive
+                  ? 'Preferencia activa · llegadas y Latidos'
+                  : pushState?.permission === 'denied'
+                    ? 'Permiso bloqueado en tu navegador'
+                    : 'Estructura lista para OneSignal cuando publiques'
+            }</small></span>
+            <button type="button" class="orb sm ${pushActive ? 'is-active' : ''}" ${!pushSupported ? 'disabled' : ''} data-act="toggle-push">${iconBell(!pushActive)}</button>
+          </div>
+          ${
+            pushActive
+              ? `<div class="row">
+                  <span><b>Modo discreto en avisos</b><small>${
+                    pushDiscrete
+                      ? 'Oculta nombres y códigos en pantalla bloqueada'
+                      : 'Muestra alias y código en la notificación'
+                  }</small></span>
+                  <button type="button" class="orb sm ${pushDiscrete ? 'is-active' : ''}" data-act="toggle-push-discrete">${iconLock(!pushDiscrete)}</button>
+                </div>`
+              : ''
+          }
+          <div class="row">
+            <span><b>SUPER KEY · Asistente Compañero</b><small>Inteligente, empático y sin preguntas</small></span>
+            <button type="button" class="orb sm" data-act="open-superkey">${iconSuperKey()}</button>
+          </div>
+          <div class="row">
+            <span><b>Mini Tienda de Latidos</b><small>Auras, soundscapes y perks con tus puntos</small></span>
+            <button type="button" class="orb sm" data-act="open-tienda">${iconReaction('heartbeat')}</button>
+          </div>
+          <div class="row">
+            <span><b>Mi cuenta y cámara</b><small>Cambiar nombre o reconectar dispositivos</small></span>
+            <button type="button" class="orb sm" data-act="open-acct">${iconUsers()}</button>
+          </div>
+          ${
+            isHost
+              ? `<div class="row">
+                  <span><b>Controles de sala</b><small>${
+                    waitingCount > 0 ? `${waitingCount} en SPACE esperando` : 'Bloquear, silenciar o recibidor SPACE'
+                  }</small></span>
+                  <button type="button" class="orb sm ${waitingCount > 0 ? 'is-active' : ''}" data-act="open-mod">${iconShield()}</button>
+                </div>`
+              : ''
+          }
+          ${
+            isAdmin
+              ? `<div class="row">
+                  <span><b>Panel de Control</b><small>Métricas en vivo, usuarios y salas</small></span>
+                  <button type="button" class="orb sm is-active" data-act="open-admin">${iconChart()}</button>
+                </div>`
+              : ''
+          }
+        </div>
+      </section>
+    `;
+  }
+
+  if (sheet === 'space-config') {
+    return renderSpaceConfigSheetHtml(ctx.suiteProfile || null);
+  }
+
+  if (sheet === 'tienda') {
+    return renderMiniTiendaHtml();
   }
 
   if (sheet === 'install') {
@@ -1027,6 +1221,249 @@ export function renderRoomSheetHtml(sheet, ctx) {
   return '';
 }
 
+export function renderMiniTiendaHtml() {
+  const balance = getLatidosBalance();
+  const perks = getPurchasedPerks();
+
+  return `
+    <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh">
+      <button type="button" class="orb sm x" data-act="close" aria-label="Cerrar">${iconClose()}</button>
+      <h2 id="sh">Mini Tienda de Recompensas</h2>
+      <p id="sp">Canjea los Latidos que recibes o ganas invitando a tu Suite.</p>
+      <div id="sf">
+        <div class="tienda-balance-card">
+          <div class="tienda-balance-info">
+            <b>Tus Latidos Disponibles</b>
+            <small>Ganas +3 Latidos por cada invitación enviada</small>
+          </div>
+          <div class="tienda-balance-num">
+            ${iconReaction('heartbeat')}
+            <span id="tienda-balance-val">${balance}</span>
+          </div>
+        </div>
+
+        <div class="tienda-grid">
+          ${DIGITAL_PERKS.map((perk) => {
+            const isUnlocked = perks.includes(perk.id);
+            return `
+              <div class="perk-card" data-perk-id="${perk.id}">
+                <div class="perk-meta">
+                  <b>${esc(perk.title)}</b>
+                  <small>${esc(perk.desc)}</small>
+                </div>
+                <button type="button" class="perk-action-btn ${isUnlocked ? 'unlocked' : ''}" data-act-perk="${perk.id}" ${isUnlocked ? 'disabled' : ''}>
+                  ${isUnlocked ? 'Activado ✓' : `Canjear (${perk.cost} Latidos)`}
+                </button>
+              </div>
+            `;
+          }).join('')}
+        </div>
+
+        <div class="row2" style="margin-top:14px">
+          <button type="button" class="tr-b" data-act="invite-more">Invitar amigos (+3 Latidos)</button>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+export function bindMiniTiendaEvents(container, { onClose, onToast, onOpenInvite }) {
+  container.addEventListener('click', (e) => {
+    const closeBtn = e.target.closest('[data-act="close"]');
+    if (closeBtn) {
+      onClose();
+      return;
+    }
+
+    const inviteBtn = e.target.closest('[data-act="invite-more"]');
+    if (inviteBtn) {
+      addLatidos(3);
+      onToast('¡Ganaste +3 Latidos por invitar!');
+      playSpatialHeartbeatSound();
+      if (onOpenInvite) onOpenInvite();
+      return;
+    }
+
+    const perkBtn = e.target.closest('[data-act-perk]');
+    if (perkBtn) {
+      const perkId = perkBtn.getAttribute('data-act-perk');
+      const res = unlockPerk(perkId);
+      if (res.ok) {
+        perkBtn.classList.add('unlocked');
+        perkBtn.disabled = true;
+        perkBtn.textContent = 'Activado ✓';
+        const valEl = container.querySelector('#tienda-balance-val');
+        if (valEl) valEl.textContent = String(getLatidosBalance());
+        playSpatialHeartbeatSound();
+        onToast(`¡${res.perk?.title || 'Recompensa'} activada!`);
+      } else {
+        onToast(res.error || 'No se pudo canjear');
+      }
+    }
+  });
+}
+
+export class SuperKeyController {
+  constructor(mountEl, { onClose, onToast }) {
+    this.mountEl = mountEl;
+    this.onClose = onClose;
+    this.onToast = onToast;
+    this.history = [];
+    this.busy = false;
+
+    this._render();
+    this._bindEvents();
+  }
+
+  _render() {
+    this.mountEl.innerHTML = `
+      <section class="sk-sheet" role="dialog" aria-modal="true" aria-labelledby="sk-title">
+        <header class="sk-header">
+          <div class="sk-header-title">
+            ${iconSuperKey()}
+            <div>
+              <h3 id="sk-title">SUPER KEY</h3>
+              <span>Compañero Oficial</span>
+            </div>
+          </div>
+          <button type="button" class="orb sm x" id="sk-close-btn" aria-label="Cerrar">${iconClose()}</button>
+        </header>
+        <div class="sk-body" id="sk-messages">
+          <div class="sk-msg assistant">
+            Qué onda. Soy tu SUPER KEY, tu compañero inteligente dentro de spaceSUITE. Aquí tienes un espacio seguro, privado y sin barreras para sentir y conectar. Cuéntame qué necesitas y lo resolvemos de volada.
+          </div>
+        </div>
+        <div class="sk-chips" id="sk-chips">
+          <button type="button" class="sk-chip" data-sk-prompt="Explícame cómo funcionan los Latidos para pedir un 1:1">Latidos y 1:1</button>
+          <button type="button" class="sk-chip" data-sk-prompt="¿Cómo funciona el audio espacial en la sala?">Audio Espacial</button>
+          <button type="button" class="sk-chip" data-sk-prompt="¿Cómo activo los subtítulos limpios en vivo?">Subtítulos</button>
+          <button type="button" class="sk-chip" data-sk-prompt="Adapta tu lenguaje a LSM o frases directas sin rodeos">LSM / Directo</button>
+          <button type="button" class="sk-chip" data-sk-prompt="¿Qué recompensas puedo desbloquear en la Mini Tienda?">Mini Tienda</button>
+        </div>
+        <form class="sk-footer" id="sk-form">
+          <input type="text" class="sk-input" id="sk-input" placeholder="Escribe a SUPER KEY…" maxlength="400" autocomplete="off" />
+          <button type="submit" class="sk-send-btn" id="sk-send" aria-label="Enviar mensaje">Enviar</button>
+        </form>
+      </section>
+    `;
+  }
+
+  _bindEvents() {
+    const closeBtn = this.mountEl.querySelector('#sk-close-btn');
+    closeBtn?.addEventListener('click', () => this.onClose?.());
+
+    const form = this.mountEl.querySelector('#sk-form');
+    const input = this.mountEl.querySelector('#sk-input');
+    const chips = this.mountEl.querySelector('#sk-chips');
+
+    chips?.addEventListener('click', (e) => {
+      const chip = e.target.closest('[data-sk-prompt]');
+      if (!chip || this.busy) return;
+      const prompt = chip.getAttribute('data-sk-prompt');
+      this._sendMessage(prompt);
+    });
+
+    form?.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const text = input?.value?.trim();
+      if (!text || this.busy) return;
+      input.value = '';
+      this._sendMessage(text);
+    });
+
+    setTimeout(() => input?.focus(), 150);
+  }
+
+  async _sendMessage(text) {
+    if (this.busy) return;
+    this.busy = true;
+
+    const msgsEl = this.mountEl.querySelector('#sk-messages');
+    const sendBtn = this.mountEl.querySelector('#sk-send');
+    if (sendBtn) sendBtn.disabled = true;
+
+    const userDiv = document.createElement('div');
+    userDiv.className = 'sk-msg user';
+    userDiv.textContent = text;
+    msgsEl.appendChild(userDiv);
+    msgsEl.scrollTop = msgsEl.scrollHeight;
+
+    this.history.push({ role: 'user', text });
+
+    const typingDiv = document.createElement('div');
+    typingDiv.className = 'sk-msg assistant';
+    typingDiv.innerHTML = '<span style="opacity:0.65">Pensando de volada…</span>';
+    msgsEl.appendChild(typingDiv);
+    msgsEl.scrollTop = msgsEl.scrollHeight;
+
+    try {
+      const res = await fetch('/api/gemini/super-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text, history: this.history }),
+      });
+      const data = await res.json().catch(() => null);
+      typingDiv.remove();
+
+      let reply = data?.reply || 'Todo listo en tu Suite. Cuentas conmigo para cualquier función dentro de la sala.';
+      reply = reply.replace(/\s*\¿[^\?\n]+\?\s*$/i, '').trim() || reply;
+
+      const replyDiv = document.createElement('div');
+      replyDiv.className = 'sk-msg assistant';
+      replyDiv.textContent = reply;
+      msgsEl.appendChild(replyDiv);
+      msgsEl.scrollTop = msgsEl.scrollHeight;
+
+      this.history.push({ role: 'model', text: reply });
+    } catch {
+      typingDiv.remove();
+      const errDiv = document.createElement('div');
+      errDiv.className = 'sk-msg assistant';
+      errDiv.textContent = 'Aquí estoy contigo. Hubo un leve parpadeo de red pero tu Suite sigue protegida.';
+      msgsEl.appendChild(errDiv);
+    } finally {
+      this.busy = false;
+      if (sendBtn) sendBtn.disabled = false;
+      this.mountEl.querySelector('#sk-input')?.focus();
+    }
+  }
+
+  destroy() {}
+}
+
+export function renderSpaceConfigSheetHtml(profile = null) {
+  const p = profile || {};
+  return `
+    <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh">
+      <button type="button" class="orb sm x" data-act="close" data-lsh="close" aria-label="Cerrar">${iconClose()}</button>
+      <h2 id="sh">Personalizar SPACE</h2>
+      <p id="sp">Configura lo que verán tus invitados en el recibidor antes de pedir entrada. Si lo dejas vacío, se mostrará el fondo arquitectónico oscuro.</p>
+      <form id="space-config-form" class="space-cfg-form">
+        <label class="space-cfg-field">
+          <span>Título de tu Suite</span>
+          <input id="spc-title" type="text" maxlength="80" placeholder="Ej. Noche de plática sin filtros" value="${esc(p.title || '')}" />
+        </label>
+        <label class="space-cfg-field">
+          <span>Descripción breve</span>
+          <textarea id="spc-desc" maxlength="220" rows="2" placeholder="Cuéntales el mood o de qué va esta Suite...">${esc(p.description || '')}</textarea>
+        </label>
+        <label class="space-cfg-field">
+          <span>URL de video corto en loop (MP4 / WebM)</span>
+          <input id="spc-cover-vid" type="url" maxlength="600" placeholder="https://.../ambiente.mp4 (opcional)" value="${esc(p.coverVideo || '')}" />
+        </label>
+        <label class="space-cfg-field">
+          <span>URL de imagen de portada (si no usas video)</span>
+          <input id="spc-cover-img" type="url" maxlength="600" placeholder="https://.../portada.jpg (opcional)" value="${esc(p.coverImage || '')}" />
+        </label>
+        <div class="row2" style="margin-top:6px">
+          <button type="submit" class="tr-b">Guardar SPACE</button>
+          <button type="button" class="tr-g" data-act="reset-space-config">Fondo por defecto</button>
+        </div>
+      </form>
+    </section>
+  `;
+}
+
 export function renderQuickPeekHtml(peer, selfPeerId) {
   if (!peer) return '';
   return `
@@ -1034,7 +1471,7 @@ export function renderQuickPeekHtml(peer, selfPeerId) {
     <div class="pm">
       <div>
         <b>${esc(peer.name)}</b>
-        <span>${peer.role === 'host' ? 'Anfitrión' : 'En línea'}</span>
+        <span>${peer.role === 'host' ? 'Creador' : 'En línea'}</span>
       </div>
       <div class="a">
         ${
@@ -1048,3 +1485,4 @@ export function renderQuickPeekHtml(peer, selfPeerId) {
     </div>
   `;
 }
+

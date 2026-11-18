@@ -7,6 +7,8 @@ import {
   type ChatMessage,
   type PagesContext,
   type PeerInfo,
+  type RoomInteractiveState,
+  type SuiteProfile,
 } from '../../_shared/cf.ts';
 import {
   addAuditEvent,
@@ -25,6 +27,31 @@ import {
   upsertRoomParticipant,
 } from '../../_shared/store.ts';
 
+function sanitizeMediaUrl(raw: unknown): string {
+  const s = typeof raw === 'string' ? raw.trim().slice(0, 600) : '';
+  if (!s) return '';
+  if (/^(https?:\/\/|\/assets\/|data:image\/)/i.test(s)) return s;
+  return '';
+}
+
+function sanitizeSuiteProfile(raw: unknown, updatedBy?: string): SuiteProfile | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+  const title = typeof obj.title === 'string' ? obj.title.trim().slice(0, 80) : '';
+  const description = typeof obj.description === 'string' ? obj.description.trim().slice(0, 220) : '';
+  const coverImage = sanitizeMediaUrl(obj.coverImage);
+  const coverVideo = sanitizeMediaUrl(obj.coverVideo);
+  if (!title && !description && !coverImage && !coverVideo) return null;
+  return {
+    title: title || undefined,
+    description: description || undefined,
+    coverImage: coverImage || undefined,
+    coverVideo: coverVideo || undefined,
+    updatedBy: updatedBy ? updatedBy.slice(0, 32) : undefined,
+    updatedAt: Date.now(),
+  };
+}
+
 export async function onRequestGet(context: PagesContext<{ code?: string }>): Promise<Response> {
   const code = normalizeRoomCode(context.params.code || '');
   const url = new URL(context.request.url);
@@ -32,7 +59,7 @@ export async function onRequestGet(context: PagesContext<{ code?: string }>): Pr
 
   if (!poll) {
     const summary = await getRoomSummary(context.env, code);
-    return jsonResponse(summary);
+    return jsonResponse({ ok: true, ...summary });
   }
 
   const peerId = (url.searchParams.get('peerId') || '').trim();
@@ -121,7 +148,7 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
         ok: true,
         type: 'room:rejected',
         reason: 'blocked',
-        message: 'El anfitrión bloqueó el acceso a esta sala.',
+        message: 'Esta Suite tiene el acceso restringido para tu dispositivo.',
       });
     }
 
@@ -133,6 +160,14 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
 
     if (shouldBeHost && cleanPass) {
       state.meta.pass = cleanPass;
+    }
+
+    if (shouldBeHost && body.suiteProfile && typeof body.suiteProfile === 'object') {
+      const nextProfile = sanitizeSuiteProfile(body.suiteProfile, cleanName);
+      if (nextProfile) {
+        state.meta.interactive = { ...(state.meta.interactive || {}), suiteProfile: nextProfile };
+        state.meta.suiteProfile = nextProfile;
+      }
     }
 
     if (!alreadyActive && active.length >= MAX_ROOM_PARTICIPANTS) {
@@ -149,7 +184,7 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
         ok: true,
         type: 'room:rejected',
         reason: 'locked',
-        message: 'El anfitrión bloqueó la sala.',
+        message: 'Esta Suite está cerrada temporalmente.',
       });
     }
 
@@ -168,7 +203,7 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
       });
     }
 
-    if (state.meta.waitingRoom && !shouldBeHost && !state.admittedClientIds.includes(clientId)) {
+    if (state.meta.waitingRoom && !shouldBeHost && !alreadyActive) {
       const waitInfo: PeerInfo = {
         peerId: peerId || crypto.randomUUID(),
         clientId,
@@ -189,6 +224,7 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
         type: 'room:waiting',
         roomCode: code,
         name: cleanName,
+        meta: state.meta,
         lastEventId,
       });
     }
@@ -284,23 +320,43 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
       patch.initial = getInitial(patch.name);
     }
     await patchParticipantState(context.env, code, peerId, patch);
-    return jsonResponse({ ok: true });
+    if (patch.name) {
+      await pushRoomEvent(
+        context.env,
+        code,
+        'peer:name_updated',
+        { peerId, name: patch.name, initial: patch.initial },
+        null,
+        peerId,
+      );
+    }
+    return jsonResponse({ ok: true, peer: { ...sender, ...patch } });
   }
 
   if (signalType === 'chat:send') {
     const text = (typeof body.text === 'string' ? body.text : '').trim().slice(0, 500);
     if (!text) return jsonResponse({ ok: true });
     const toPeerId = typeof body.toPeerId === 'string' && body.toPeerId ? body.toPeerId : null;
+    const msgId = typeof body.messageId === 'string' && body.messageId ? body.messageId : crypto.randomUUID();
+    const timestamp = typeof body.timestamp === 'number' && body.timestamp ? body.timestamp : Date.now();
     const chatMsg: ChatMessage = {
-      id: crypto.randomUUID(),
+      id: msgId,
       roomCode: code,
       fromPeerId: peerId,
       fromName: sender.name,
       toPeerId,
       text,
-      timestamp: Date.now(),
+      timestamp,
     };
     await addRoomMessage(context.env, chatMsg);
+    await pushRoomEvent(
+      context.env,
+      code,
+      'chat:message',
+      { message: chatMsg },
+      toPeerId,
+      peerId,
+    );
     return jsonResponse({ ok: true, type: 'chat:message', message: chatMsg });
   }
 
@@ -335,6 +391,111 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
     return jsonResponse({ ok: true });
   }
 
+  if (signalType === 'reaction:send') {
+    const allowedKinds = new Set(['pulse', 'spark', 'heart', 'heartbeat', 'orbit', 'toast']);
+    const rawKind = typeof body.kind === 'string' ? body.kind.trim() : '';
+    const kind = allowedKinds.has(rawKind) ? rawKind : 'heartbeat';
+    const reaction = {
+      id: crypto.randomUUID(),
+      peerId,
+      name: sender.name,
+      kind,
+      timestamp: Date.now(),
+    };
+    await pushRoomEvent(context.env, code, 'reaction:received', { reaction }, null, peerId);
+    return jsonResponse({ ok: true, reaction });
+  }
+
+  if (signalType === 'subtitle:broadcast') {
+    const text = String(body.text || '').trim().slice(0, 300);
+    if (text) {
+      const subtitle = {
+        id: crypto.randomUUID(),
+        peerId,
+        name: sender.name,
+        text,
+        timestamp: Date.now(),
+      };
+      await pushRoomEvent(context.env, code, 'subtitle:received', { subtitle }, null, peerId);
+      return jsonResponse({ ok: true, subtitle });
+    }
+    return jsonResponse({ ok: true });
+  }
+
+  if (signalType === 'room:interactive') {
+    const act = typeof body.action === 'string' ? body.action.trim() : '';
+    const payload = (body.payload && typeof body.payload === 'object' ? body.payload : {}) as Record<string, unknown>;
+    const interactive: RoomInteractiveState = { ...(state.meta.interactive || {}) };
+
+    if (act === 'mood:set') {
+      const allowedMoods = new Set(['cosmos', 'emerald', 'amber', 'indigo']);
+      const nextMood = typeof payload.mood === 'string' && allowedMoods.has(payload.mood)
+        ? (payload.mood as RoomInteractiveState['mood'])
+        : null;
+      interactive.mood = nextMood;
+    } else if (act === 'card:deal') {
+      const id = String(payload.id || crypto.randomUUID()).slice(0, 48);
+      const category = String(payload.category || 'Carta Cósmica').trim().slice(0, 32) || 'Carta Cósmica';
+      const prompt = String(payload.prompt || '').trim().slice(0, 180);
+      if (prompt) {
+        interactive.card = { id, category, prompt, byName: sender.name };
+      }
+    } else if (act === 'card:clear') {
+      interactive.card = null;
+    } else if (act === 'poll:start') {
+      const question = String(payload.question || '').trim().slice(0, 120);
+      const rawOptions = Array.isArray(payload.options) ? payload.options : [];
+      const cleanOpts = rawOptions
+        .map((o) => (typeof o === 'string' ? o.trim().slice(0, 48) : ''))
+        .filter(Boolean)
+        .slice(0, 4);
+      if (question && cleanOpts.length >= 2) {
+        interactive.poll = {
+          id: crypto.randomUUID(),
+          question,
+          options: cleanOpts.map((label, idx) => ({ id: String(idx), label, votes: [] })),
+          byName: sender.name,
+        };
+      }
+    } else if (act === 'poll:vote') {
+      const optId = typeof payload.optionId === 'string' ? payload.optionId : '';
+      if (interactive.poll && optId) {
+        interactive.poll = {
+          ...interactive.poll,
+          options: interactive.poll.options.map((opt) => {
+            const withoutSelf = (opt.votes || []).filter((id) => id !== peerId);
+            return opt.id === optId ? { ...opt, votes: [...withoutSelf, peerId] } : { ...opt, votes: withoutSelf };
+          }),
+        };
+      }
+    } else if (act === 'poll:close') {
+      interactive.poll = null;
+    } else if (act === 'timer:start') {
+      const mins = Math.max(1, Math.min(60, Math.round(Number(payload.minutes) || 5)));
+      const label = String(payload.label || `Focus ${mins} min`).trim().slice(0, 40);
+      interactive.timer = {
+        endsAt: Date.now() + mins * 60_000,
+        label,
+        byName: sender.name,
+      };
+    } else if (act === 'timer:stop') {
+      interactive.timer = null;
+    } else if (act === 'suite:profile') {
+      if (sender.role !== 'host') {
+        return jsonResponse({ ok: false, error: 'Solo quien abrió la Suite puede personalizar SPACE.' }, 403);
+      }
+      const nextProfile = sanitizeSuiteProfile(payload, sender.name);
+      interactive.suiteProfile = nextProfile;
+      state.meta.suiteProfile = nextProfile;
+    } else {
+      return jsonResponse({ ok: false, error: 'Acción interactiva no válida.' }, 400);
+    }
+
+    state.meta.interactive = interactive;
+    await saveRoomMetaAndLists(context.env, code, state.meta);
+    return jsonResponse({ ok: true, meta: state.meta });
+  }
+
   if (signalType === 'webrtc:offer' || signalType === 'webrtc:answer' || signalType === 'webrtc:ice') {
     const to = typeof body.to === 'string' ? body.to : '';
     if (!to) return jsonResponse({ ok: false, error: 'Destinatario requerido' }, 400);
@@ -348,7 +509,7 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
 
   if (signalType === 'host:action') {
     if (sender.role !== 'host') {
-      return jsonResponse({ ok: false, error: 'Solo el anfitrión puede hacer eso.' }, 403);
+      return jsonResponse({ ok: false, error: 'Solo quien abrió la Suite puede ajustar esto.' }, 403);
     }
 
     const hostAct = typeof body.action === 'string' ? body.action : '';
@@ -395,8 +556,8 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
               name: waitGuest.name,
               initial: waitGuest.initial,
               role: 'guest',
-              micOn: true,
-              camOn: true,
+              micOn: waitGuest.micOn ?? true,
+              camOn: waitGuest.camOn ?? true,
               handRaised: false,
               screenSharing: false,
               speaking: false,
@@ -423,8 +584,8 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
           {
             reason: body.block ? 'blocked' : 'rejected',
             message: body.block
-              ? 'El anfitrión bloqueó el acceso a esta sala.'
-              : 'El anfitrión no aceptó tu solicitud.',
+              ? 'Esta Suite tiene el acceso restringido para tu dispositivo.'
+              : 'En este momento la Suite está ocupada. Puedes intentar más tarde.',
           },
           targetPeerId,
           peerId,
@@ -457,8 +618,8 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
           {
             reason: body.block ? 'blocked' : 'kicked',
             message: body.block
-              ? 'Fuiste bloqueado de esta sala por el anfitrión.'
-              : 'El anfitrión te quitó de esta sala.',
+              ? 'Tu acceso a esta Suite fue cerrado.'
+              : 'Saliste de esta Suite.',
           },
           targetPeerId,
           peerId,
@@ -469,7 +630,7 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
         context.env,
         code,
         'room:rejected',
-        { reason: 'ended', message: 'El anfitrión cerró la sala.' },
+        { reason: 'ended', message: 'La Suite cerró por hoy.' },
         null,
         peerId,
       );

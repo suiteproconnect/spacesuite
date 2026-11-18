@@ -1,6 +1,7 @@
 import http from 'node:http';
 import fs from 'node:fs/promises';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -8,7 +9,13 @@ const PORT = Number(process.env.PORT || 3000);
 const ROOT_DIR = process.cwd();
 const STATIC_DIR = ROOT_DIR;
 const FUNCTIONS_DIR = path.join(ROOT_DIR, 'functions');
-const ALLOWED_ROOT_FILES = new Set(['/index.html', '/styles.css', '/app.js', '/manifest.webmanifest']);
+const ALLOWED_ROOT_FILES = new Set([
+  '/index.html',
+  '/styles.css',
+  '/app.js',
+  '/manifest.webmanifest',
+  '/favicon.ico',
+]);
 const ALLOWED_PREFIXES = ['/js/', '/assets/'];
 
 // Load .env if present without external dependencies
@@ -33,6 +40,73 @@ if (existsSync(envPath)) {
   }
 }
 
+function createNodeSqliteD1(dbFilePath) {
+  mkdirSync(path.dirname(dbFilePath), { recursive: true });
+  const sqlite = new DatabaseSync(dbFilePath);
+  sqlite.exec('PRAGMA journal_mode = WAL;');
+  sqlite.exec('PRAGMA busy_timeout = 5000;');
+
+  function makeStatement(query, boundParams = []) {
+    const cleanParams = boundParams.map((v) => (v === undefined ? null : v));
+    return {
+      bind(...values) {
+        return makeStatement(query, values);
+      },
+      async first(colName) {
+        const stmt = sqlite.prepare(query);
+        const row = stmt.get(...cleanParams);
+        if (!row) return null;
+        if (colName) return row[colName] ?? null;
+        return row;
+      },
+      async run() {
+        const stmt = sqlite.prepare(query);
+        const info = stmt.run(...cleanParams);
+        return {
+          results: [],
+          success: true,
+          meta: {
+            last_row_id: Number(info.lastInsertRowid || 0),
+            changes: Number(info.changes || 0),
+          },
+        };
+      },
+      async all() {
+        const stmt = sqlite.prepare(query);
+        const rows = stmt.all(...cleanParams);
+        return {
+          results: rows,
+          success: true,
+          meta: {},
+        };
+      },
+    };
+  }
+
+  return {
+    prepare(query) {
+      return makeStatement(query);
+    },
+    async batch(statements) {
+      const out = [];
+      for (const st of statements) {
+        out.push(await st.run());
+      }
+      return out;
+    },
+    async exec(query) {
+      sqlite.exec(query);
+      return { count: 1 };
+    },
+  };
+}
+
+const localDb = createNodeSqliteD1(path.join(ROOT_DIR, '.data', 'spacesuite.sqlite'));
+const runtimeEnv = {
+  ...process.env,
+  DB: localDb,
+};
+
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
@@ -54,6 +128,7 @@ const STATIC_API_ROUTES = {
   '/api/health': 'api/health.ts',
   '/api/salud': 'api/salud.ts',
   '/api/metered/session': 'api/metered/session.ts',
+  '/api/auth/status': 'api/auth/status.ts',
   '/api/auth/register': 'api/auth/register.ts',
   '/api/auth/verify-email': 'api/auth/verify-email.ts',
   '/api/auth/resend-code': 'api/auth/resend-code.ts',
@@ -62,6 +137,8 @@ const STATIC_API_ROUTES = {
   '/api/auth/update-name': 'api/auth/update-name.ts',
   '/api/admin/metrics': 'api/admin/metrics.ts',
   '/api/admin/users/role': 'api/admin/users/role.ts',
+  '/api/admin/users/create': 'api/admin/users/create.ts',
+  '/api/gemini/super-key': 'api/gemini/super-key.ts',
 };
 
 const moduleCache = new Map();
@@ -131,7 +208,7 @@ async function handleApi(req, res, url) {
 
   const context = {
     request,
-    env: process.env,
+    env: runtimeEnv,
     params: matched ? matched.params : {},
     next: async () => {
       if (!matched) {
@@ -150,7 +227,7 @@ async function handleApi(req, res, url) {
       }
       return handler({
         request,
-        env: process.env,
+        env: runtimeEnv,
         params: matched.params,
         next: async () => new Response(null, { status: 404 }),
       });
@@ -167,7 +244,25 @@ async function handleApi(req, res, url) {
   res.end(buf);
 }
 
-async function handleStatic(res, pathname) {
+function resolvePublicOrigin(req) {
+  const rawHost = String(req.headers['x-forwarded-host'] || req.headers.host || '')
+    .split(',')[0]
+    .trim();
+  const isLocal = !rawHost || /^(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?$/i.test(rawHost);
+  if (isLocal) {
+    const envOrigin = process.env.APP_URL;
+    if (envOrigin && /^https?:\/\//i.test(envOrigin) && !envOrigin.includes('MY_APP_URL')) {
+      return envOrigin.replace(/\/+$/, '');
+    }
+  }
+  const host = rawHost || `127.0.0.1:${PORT}`;
+  const rawProto = String(req.headers['x-forwarded-proto'] || (isLocal ? 'http' : 'https'))
+    .split(',')[0]
+    .trim();
+  return `${rawProto}://${host}`;
+}
+
+async function handleStatic(req, res, pathname) {
   let cleanPath = decodeURIComponent(pathname);
   if (cleanPath === '/') cleanPath = '/index.html';
 
@@ -183,6 +278,12 @@ async function handleStatic(res, pathname) {
 
   let stat = isAllowed ? await fs.stat(fileToServe).catch(() => null) : null;
   if (!stat || stat.isDirectory()) {
+    const hasFileExt = /\.[a-z0-9]{1,12}$/i.test(cleanPath);
+    if (hasFileExt) {
+      res.writeHead(404);
+      res.end('Not found');
+      return;
+    }
     // SPA fallback (/sala/* or client routes)
     fileToServe = path.join(STATIC_DIR, 'index.html');
     stat = await fs.stat(fileToServe).catch(() => null);
@@ -195,8 +296,16 @@ async function handleStatic(res, pathname) {
 
   const ext = path.extname(fileToServe).toLowerCase();
   const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-  const data = await fs.readFile(fileToServe);
-  res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'no-cache' });
+  let data = await fs.readFile(fileToServe);
+  if (ext === '.html') {
+    const publicOrigin = resolvePublicOrigin(req);
+    const html = data
+      .toString('utf8')
+      .replaceAll('https://spacesuite.pages.dev', publicOrigin);
+    data = Buffer.from(html, 'utf8');
+  }
+  const headers = { 'Content-Type': contentType, 'Cache-Control': 'no-cache' };
+  res.writeHead(200, headers);
   res.end(data);
 }
 
@@ -207,7 +316,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname.startsWith('/api/')) {
       await handleApi(req, res, url);
     } else {
-      await handleStatic(res, url.pathname);
+      await handleStatic(req, res, url.pathname);
     }
   } catch (err) {
     console.error('Server error:', err);

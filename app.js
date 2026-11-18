@@ -1,6 +1,9 @@
 import { getRoomFromUrl, loadSuiteUser, saveSuiteUser } from './js/identity.js';
 import { LobbyController } from './js/lobby.js';
+import { initOneSignalAdapter } from './js/push.js';
 import { RoomController } from './js/room-ui.js';
+
+initOneSignalAdapter();
 
 const rootEl = document.getElementById('root');
 
@@ -44,6 +47,7 @@ function mountActiveView() {
     initialPass: activeRoom.pass,
     initialName: activeRoom.name,
     wantHost: activeRoom.wantHost,
+    suiteProfile: activeRoom.suiteProfile || null,
     user,
     onExitHome: exitHome,
     onNewRoom: (newCode, newPass) => {
@@ -74,6 +78,7 @@ function enterRoom(opts) {
     pass: opts.pass,
     name: opts.name,
     wantHost: opts.wantHost,
+    suiteProfile: opts.suiteProfile || null,
   };
   mountActiveView();
 }

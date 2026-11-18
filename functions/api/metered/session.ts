@@ -8,6 +8,73 @@ import {
 } from '../../_shared/cf.ts';
 import { getRoomSummary } from '../../_shared/store.ts';
 
+interface IceServerEntry {
+  urls: string | string[];
+  username?: string;
+  credential?: string;
+}
+
+const PUBLIC_STUN_SERVERS: IceServerEntry[] = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun2.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
+  { urls: 'stun:global.stun.twilio.com:3478' },
+];
+
+async function resolveIceServers(
+  env: PagesContext['env'],
+  domain: string,
+  secretKey: string,
+): Promise<IceServerEntry[]> {
+  const servers: IceServerEntry[] = [...PUBLIC_STUN_SERVERS];
+
+  const turnUrl = typeof env.TURN_URL === 'string' ? env.TURN_URL.trim() : '';
+  const turnUser = typeof env.TURN_USERNAME === 'string' ? env.TURN_USERNAME.trim() : '';
+  const turnCred = typeof env.TURN_CREDENTIAL === 'string' ? env.TURN_CREDENTIAL.trim() : '';
+  if (turnUrl && turnUser && turnCred) {
+    servers.push({ urls: turnUrl, username: turnUser, credential: turnCred });
+  }
+
+  const cfTurnUrl = typeof env.CLOUDFLARE_TURN_URL === 'string' ? env.CLOUDFLARE_TURN_URL.trim() : '';
+  const cfTurnUser = typeof env.CLOUDFLARE_TURN_USERNAME === 'string' ? env.CLOUDFLARE_TURN_USERNAME.trim() : '';
+  const cfTurnCred = typeof env.CLOUDFLARE_TURN_CREDENTIAL === 'string' ? env.CLOUDFLARE_TURN_CREDENTIAL.trim() : '';
+  if (cfTurnUrl && cfTurnUser && cfTurnCred) {
+    servers.push({ urls: cfTurnUrl, username: cfTurnUser, credential: cfTurnCred });
+  }
+
+  const twilioTurnUrl = typeof env.TWILIO_TURN_URL === 'string' ? env.TWILIO_TURN_URL.trim() : '';
+  const twilioTurnUser = typeof env.TWILIO_TURN_USERNAME === 'string' ? env.TWILIO_TURN_USERNAME.trim() : '';
+  const twilioTurnCred = typeof env.TWILIO_TURN_CREDENTIAL === 'string' ? env.TWILIO_TURN_CREDENTIAL.trim() : '';
+  if (twilioTurnUrl && twilioTurnUser && twilioTurnCred) {
+    servers.push({ urls: twilioTurnUrl, username: twilioTurnUser, credential: twilioTurnCred });
+  }
+
+  if (domain && secretKey) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 1800);
+      const iceRes = await fetch(
+        `https://${domain}/api/v1/turn/credentials?apiKey=${encodeURIComponent(secretKey)}`,
+        { signal: controller.signal },
+      );
+      clearTimeout(timer);
+      if (iceRes.ok) {
+        const list = (await iceRes.json().catch(() => null)) as IceServerEntry[] | null;
+        if (Array.isArray(list)) {
+          for (const item of list) {
+            if (item && item.urls) servers.push(item);
+          }
+        }
+      }
+    } catch {
+      // ignore optional TURN lookup failures
+    }
+  }
+
+  return servers;
+}
+
 export async function onRequestPost(context: PagesContext): Promise<Response> {
   const body = await parseJsonBody<{
     roomCode?: string;
@@ -42,6 +109,7 @@ export async function onRequestPost(context: PagesContext): Promise<Response> {
 
   const domain = normalizeMeteredDomain(rawDomain);
   const secretKey = rawSecret.trim();
+  const iceServers = await resolveIceServers(context.env, domain, secretKey);
 
   if (!domain || !secretKey) {
     return jsonResponse({
@@ -49,6 +117,7 @@ export async function onRequestPost(context: PagesContext): Promise<Response> {
       configured: false,
       mode: 'p2p-fallback',
       roomName,
+      iceServers,
       maxParticipants: MAX_ROOM_PARTICIPANTS,
       currentCount,
     });
@@ -77,14 +146,15 @@ export async function onRequestPost(context: PagesContext): Promise<Response> {
     );
 
     if (!roomResp.ok && roomResp.status !== 400 && roomResp.status !== 409) {
-      const errBody = await roomResp.text();
-      return jsonResponse(
-        {
-          ok: false,
-          error: `Error creando sala en Metered (${roomResp.status}): ${errBody.slice(0, 120)}`,
-        },
-        502,
-      );
+      return jsonResponse({
+        ok: true,
+        configured: false,
+        mode: 'p2p-fallback',
+        roomName,
+        iceServers,
+        maxParticipants: MAX_ROOM_PARTICIPANTS,
+        currentCount,
+      });
     }
 
     const tokenResp = await fetch(
@@ -107,13 +177,15 @@ export async function onRequestPost(context: PagesContext): Promise<Response> {
     };
 
     if (!tokenResp.ok || !tokenJson.token) {
-      return jsonResponse(
-        {
-          ok: false,
-          error: tokenJson.message || `No se pudo generar token Metered (${tokenResp.status}).`,
-        },
-        502,
-      );
+      return jsonResponse({
+        ok: true,
+        configured: false,
+        mode: 'p2p-fallback',
+        roomName,
+        iceServers,
+        maxParticipants: MAX_ROOM_PARTICIPANTS,
+        currentCount,
+      });
     }
 
     return jsonResponse({
@@ -124,17 +196,20 @@ export async function onRequestPost(context: PagesContext): Promise<Response> {
       roomName,
       domain,
       accessToken: tokenJson.token,
+      iceServers,
       maxParticipants: MAX_ROOM_PARTICIPANTS,
       currentCount,
     });
-  } catch (err) {
-    return jsonResponse(
-      {
-        ok: false,
-        error: err instanceof Error ? err.message : 'Fallo de conexión con Metered SFU.',
-      },
-      500,
-    );
+  } catch {
+    return jsonResponse({
+      ok: true,
+      configured: false,
+      mode: 'p2p-fallback',
+      roomName,
+      iceServers,
+      maxParticipants: MAX_ROOM_PARTICIPANTS,
+      currentCount,
+    });
   }
 }
 

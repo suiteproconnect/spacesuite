@@ -63,10 +63,10 @@ export function randomIntRange(min: number, maxExclusive: number): number {
 
 export function generateServerSuiteCode(): string {
   let s = '';
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < 6; i++) {
     s += CODE_CHARS[randomIntRange(0, CODE_CHARS.length)];
   }
-  return `SS-SALA-${s}`;
+  return s;
 }
 
 export function generateServerSuitePass(): string {
@@ -114,8 +114,26 @@ export async function verifyPassword(
   salt: string,
   expectedHash: string,
 ): Promise<boolean> {
-  const { hash } = await hashPassword(password, salt);
-  return constantTimeEqual(hexToBytes(hash), hexToBytes(expectedHash));
+  if (!password || !expectedHash) return false;
+  let actualSalt = salt || '';
+  let actualExpected = expectedHash;
+
+  if (!actualSalt && actualExpected.includes(':')) {
+    const idx = actualExpected.indexOf(':');
+    actualSalt = actualExpected.slice(0, idx);
+    actualExpected = actualExpected.slice(idx + 1);
+  }
+
+  // Legacy SHA-256 hex support if migrated without salt
+  if (!actualSalt && actualExpected.length === 64) {
+    const digest = await crypto.subtle.digest('SHA-256', encoder.encode(password));
+    const shaHex = bytesToHex(new Uint8Array(digest));
+    return constantTimeEqual(hexToBytes(shaHex), hexToBytes(actualExpected));
+  }
+
+  if (!actualSalt) return false;
+  const { hash } = await hashPassword(password, actualSalt);
+  return constantTimeEqual(hexToBytes(hash), hexToBytes(actualExpected));
 }
 
 export async function signTokenPayload(

@@ -8,7 +8,7 @@ export async function onRequestPost(
   const auth = await requireAuth(context);
   if ('errorResponse' in auth) return auth.errorResponse;
   if (auth.user.role !== 'admin') {
-    return jsonResponse({ error: 'Acceso restringido a administradores.' }, 403);
+    return jsonResponse({ error: 'Acceso restringido a cuentas principales.' }, 403);
   }
 
   const body = await parseJsonBody<{

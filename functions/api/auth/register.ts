@@ -11,6 +11,8 @@ export async function onRequestPost(context: PagesContext): Promise<Response> {
     email?: string;
     password?: string;
     dob?: string;
+    wantAdmin?: boolean;
+    adminKey?: string;
   }>(context.request);
 
   const cleanName = (typeof body.name === 'string' ? body.name : '').trim();
@@ -38,18 +40,31 @@ export async function onRequestPost(context: PagesContext): Promise<Response> {
     return jsonResponse({ error: 'Ya existe una cuenta verificada con ese correo.' }, 409);
   }
 
-  const { user, code } = await createOrUpdatePendingUser(context.env, {
+  const result = await createOrUpdatePendingUser(context.env, {
     name: cleanName,
     email: cleanEmail,
     password,
+    wantAdmin: typeof body.wantAdmin === 'boolean' ? body.wantAdmin : undefined,
+    adminKey: typeof body.adminKey === 'string' ? body.adminKey : undefined,
   });
-  await addAuditEvent(context.env, 'auth', user.email, 'Registro iniciado (verificación Edge)');
+
+  if (!result.ok) {
+    return jsonResponse({ error: result.error }, result.status);
+  }
+
+  await addAuditEvent(
+    context.env,
+    'auth',
+    result.user.email,
+    `Registro iniciado (${result.user.role})`,
+  );
 
   return jsonResponse({
     ok: true,
     requiresVerification: true,
-    email: user.email,
+    email: result.user.email,
+    role: result.user.role,
     deliveredVia: 'dev',
-    devCode: code,
+    devCode: result.code,
   });
 }

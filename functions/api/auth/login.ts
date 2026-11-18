@@ -3,12 +3,14 @@ import { generateOtpCode, verifyPassword } from '../../_shared/crypto.ts';
 import {
   addAuditEvent,
   createAuthToken,
+  ensureBootstrapAdmin,
   findUserByEmail,
   sanitizePublicUser,
   updateUser,
 } from '../../_shared/store.ts';
 
 export async function onRequestPost(context: PagesContext): Promise<Response> {
+  await ensureBootstrapAdmin(context.env);
   const body = await parseJsonBody<{ email?: string; password?: string }>(context.request);
   const cleanEmail = (typeof body.email === 'string' ? body.email : '').trim().toLowerCase();
   const password = typeof body.password === 'string' ? body.password : '';

@@ -9,25 +9,50 @@ import {
   iconClose,
   iconDownload,
   iconEye,
+  iconHeartbeat,
   iconInvite,
   iconLeave,
+  iconLock,
+  iconReaction,
   iconSendPlane,
   iconShare,
   iconShield,
+  iconSuperKey,
   iconUsers,
+  playSpatialHeartbeatSound,
+  renderBrandIsotipoHtml,
+  renderBrandWordmarkHtml,
 } from './icons.js';
 import {
+  addLatidos,
   buildRoomInviteUrl,
   clearSuiteUser,
+  generateCleanRoomCode,
+  getLatidosBalance,
   getStoredName,
   loadPrefs,
+  loadSpaceDraftProfile,
+  normalizeRoomCode,
   savePrefs,
+  saveSpaceDraftProfile,
   saveSuiteUser,
 } from './identity.js';
 import {
+  disableOneSignalNotifications,
+  enableOneSignalNotifications,
+  getNotificationDiscretePref,
+  getNotificationStatus,
+  syncOneSignalRoomTag,
+  toggleNotificationDiscreteMode,
+} from './push.js';
+import {
   AdminPanelController,
+  SuperKeyController,
+  bindMiniTiendaEvents,
   bindShareSheetEvents,
+  renderMiniTiendaHtml,
   renderShareSheetHtml,
+  renderSpaceConfigSheetHtml,
 } from './sheets.js';
 
 export class LobbyController {
@@ -58,6 +83,8 @@ export class LobbyController {
       showRegPass2: false,
       regDob: '',
       regTerms: false,
+      regWantAdmin: false,
+      regAdminKey: '',
       verifyEmail: '',
       verifyCode: '',
       devCodeHint: null,
@@ -69,7 +96,18 @@ export class LobbyController {
       joinPass: '',
       joinName: user?.name || getStoredName(''),
     };
+    this.serverStatus = { loaded: false, hasAdmin: false, requiresAdminKey: false };
+    this._adminTouched = false;
     this.prefs = loadPrefs();
+    this.pushState = {
+      provider: 'onesignal',
+      configured: false,
+      supported: true,
+      permission: 'default',
+      subscribed: false,
+      discrete: getNotificationDiscretePref(),
+      busy: false,
+    };
 
     this.isIOS =
       typeof navigator !== 'undefined' &&
@@ -79,6 +117,33 @@ export class LobbyController {
     this._renderLayout();
     this._bindGlobalEvents();
     this._validateSession();
+    this._fetchServerStatus();
+    this._refreshPushState();
+  }
+
+  async _refreshPushState() {
+    const st = await getNotificationStatus().catch(() => null);
+    if (!st || this._destroyed) return;
+    this.pushState = { ...this.pushState, ...st };
+    if (this.sheet === 'prefs') this._renderSheet();
+  }
+
+  _fetchServerStatus() {
+    fetch('/api/auth/status')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((json) => {
+        if (this._destroyed || !json?.ok) return;
+        this.serverStatus = {
+          loaded: true,
+          hasAdmin: Boolean(json.hasAdmin),
+          requiresAdminKey: Boolean(json.requiresAdminKey),
+        };
+        if (!this._adminTouched && !json.hasAdmin) {
+          this.form.regWantAdmin = true;
+        }
+        if (this.screen === 'reg') this._renderTour();
+      })
+      .catch(() => {});
   }
 
   setDeferredPrompt(p) {
@@ -140,16 +205,68 @@ export class LobbyController {
   }
 
   async _handleInstall() {
-    if (this.deferredPrompt) {
-      await this.deferredPrompt.prompt();
-      this.deferredPrompt = null;
-    } else {
-      this._setSheet('install');
+    const promptObj = this.deferredPrompt || (typeof window !== 'undefined' ? window.__PWA_PROMPT__ : null);
+    if (promptObj) {
+      try {
+        await promptObj.prompt();
+        const choice = await promptObj.userChoice;
+        if (choice?.outcome === 'accepted') {
+          this.showToast('¡spaceSUITE instalada en tu dispositivo!');
+          addLatidos(3);
+          playSpatialHeartbeatSound();
+        }
+        this.deferredPrompt = null;
+        if (typeof window !== 'undefined') window.__PWA_PROMPT__ = null;
+        this._renderTour();
+        return;
+      } catch (_) {}
     }
+    if (this.isIOS) {
+      this._setSheet('install');
+    } else {
+      this.showToast('Toca el menú del navegador (⋮) e "Instalar app"');
+    }
+  }
+
+  _handleShareSuiteBonus() {
+    addLatidos(3);
+    playSpatialHeartbeatSound();
+    this.showToast('¡7 días de Suite privada y +3 Latidos otorgados!');
+    if (this.user) {
+      this._setSheet('invite');
+    } else {
+      this._setSheet('shareapp');
+    }
+  }
+
+  _handleEnterSuite() {
+    const suiteProfile = loadSpaceDraftProfile();
+    if (this.user?.suiteCode) {
+      const code = normalizeRoomCode(this.user.suiteCode) || this.user.suiteCode;
+      syncOneSignalRoomTag(code);
+      this.onEnterRoom({
+        roomCode: code,
+        pass: this.user.suitePass,
+        name: this.user.name,
+        wantHost: true,
+        suiteProfile,
+      });
+      return;
+    }
+    const storedName = getStoredName() || 'Invitado';
+    const code = generateCleanRoomCode();
+    syncOneSignalRoomTag(code);
+    this.onEnterRoom({
+      roomCode: code,
+      name: storedName,
+      wantHost: true,
+      suiteProfile,
+    });
   }
 
   _setScreen(next) {
     this.screen = next;
+    if (next === 'reg') this._fetchServerStatus();
     this._renderTour();
   }
 
@@ -188,23 +305,80 @@ export class LobbyController {
         ? `<button type="button" class="tr-back-float" data-nav="back">${iconBack()}Atrás</button>`
         : '';
 
+    const isStandalone =
+      typeof window !== 'undefined' &&
+      Boolean(
+        window.matchMedia?.('(display-mode: standalone)').matches ||
+          window.navigator.standalone === true ||
+          document.referrer.includes('android-app://')
+      );
+    const showShareSuite = isStandalone || Boolean(u);
+
+    const pwaBtnHtml = showShareSuite
+      ? `<button type="button" class="inst" data-act="share-suite-bonus">
+          ${iconReaction('heartbeat')}
+          <span>COMPARTIR SUITE</span>
+          <small>7 días privada + 3 Latidos</small>
+        </button>`
+      : `<button type="button" class="inst" data-act="install">
+          ${iconDownload()}
+          <span>INSTALAR APP</span>
+          <small>Un toque directo</small>
+        </button>`;
+
     let body = '';
     if (sc === 'welcome') {
       body = `
-        <div class="tr-body">
-          <button type="button" class="tlg-btn" style="margin:0 auto 14px;width:132px;height:132px;border-radius:30px" data-act="refresh" aria-label="Actualizar app">
-            <img class="tr-logo ${this.logoRefreshing ? 'refreshing' : ''}" style="margin:0" src="/assets/aistudio/logo-app_a1f96350.svg" alt="spaceSUITE" width="132" height="132" />
+        <header class="welcome-top-bar">
+          ${pwaBtnHtml}
+        </header>
+        <div class="tr-body welcome-body">
+          <button type="button" class="tlg-btn welcome-logo-btn" data-act="refresh" aria-label="Actualizar app">
+            <div class="tr-logo ${this.logoRefreshing ? 'refreshing' : ''}">${renderBrandIsotipoHtml({ size: 'md', live: true, idPrefix: 'wel-iso' })}</div>
           </button>
-          <div class="tr-wm">space<b>SUITE</b></div>
-          <h2>Videollamadas privadas, cara a cara.</h2>
-          <p>Salas con tu gente, cifradas y con acceso solo por invitación.</p>
-          <p class="tr-s">Solo para mayores de 18 años.</p>
-          <button type="button" class="inst" data-act="install">${iconDownload()}Instalar la app<small>Un toque</small></button>
+          <div class="tr-wm">${renderBrandWordmarkHtml()}</div>
+          <h2 class="welcome-title">Bienvenido a SPACE SUITE</h2>
+          <p class="welcome-sub">Un espacio hecho para sentir y conectar sin barreras</p>
+
+          <div class="space-superkey-card welcome-sk-card">
+            <div class="space-sk-icon">${iconSuperKey()}</div>
+            <div class="space-sk-copy">
+              <b>SUPER KEY</b>
+              <p>Qué onda, bienvenido. Tómate tu espacio con calma, aquí conectas libre, privado y sin barreras a tu ritmo.</p>
+            </div>
+          </div>
+
+          <div class="plans-container welcome-plans">
+            <div class="plan-touch-card" role="button" tabindex="0" data-act="plan-vip">
+              <div class="plan-line-1">
+                <span class="plan-name">VIP Ilimitado</span>
+                <span class="plan-price">$20.30 USD <small>/ sem</small></span>
+              </div>
+              <div class="plan-line-2">Salas de hasta 20 personas sin límite de tiempo y video 720p.</div>
+              <div class="plan-line-3">10 Latidos incluidos · Audio espacial completo.</div>
+            </div>
+
+            <div class="plan-touch-card" role="button" tabindex="0" data-act="plan-connect">
+              <div class="plan-line-1">
+                <span class="plan-name">Connect 30 Días</span>
+                <span class="plan-price">$24.50 USD <small>único</small></span>
+              </div>
+              <div class="plan-line-2">120 llamadas directas cara a cara y enlace privado permanente.</div>
+              <div class="plan-line-3">Acceso estable multiplataforma sin cortes.</div>
+            </div>
+
+            <div class="plan-touch-card" role="button" tabindex="0" data-act="plan-shield">
+              <div class="plan-line-1">
+                <span class="plan-name">Pase Escudo 14 Días</span>
+                <span class="plan-price">$14.00 USD <small>único</small></span>
+              </div>
+              <div class="plan-line-2">Acceso completo cara a cara sin restricciones de horario.</div>
+              <div class="plan-line-3">50 timbres de cortesía y soporte de SUPER KEY.</div>
+            </div>
+          </div>
         </div>
         <div class="tr-bar">
-          <button type="button" class="tr-b" data-go="reg">Crear cuenta</button>
-          <button type="button" class="tr-g" data-go="login">Ya tengo cuenta</button>
-          <button type="button" class="tr-k" data-go="code">Entrar con un código de SUITE</button>
+          <button type="button" class="tr-b entry-crimson-btn" data-act="enter-suite">Entrar a tu Suite</button>
         </div>
       `;
     } else if (sc === 'reg') {
@@ -227,6 +401,25 @@ export class LobbyController {
               <span>Fecha de nacimiento</span>
               <input type="date" max="${dob18()}" data-field="regDob" value="${esc(f.regDob)}" />
             </label>
+            <div class="reg-admin-box">
+              <label class="tr-l">
+                <input type="checkbox" data-check="regWantAdmin" ${f.regWantAdmin ? 'checked' : ''} />
+                <span>${
+                  this.serverStatus.loaded && !this.serverStatus.hasAdmin
+                    ? 'Configurar como Cuenta Principal (acceso total)'
+                    : 'Registrar como Cuenta Principal'
+                }</span>
+              </label>
+              ${
+                f.regWantAdmin && this.serverStatus.hasAdmin
+                  ? `<input type="password" maxlength="80" placeholder="${
+                      this.serverStatus.requiresAdminKey
+                        ? 'Clave de acceso principal (ADMIN_SETUP_KEY)'
+                        : 'Código de autorización principal'
+                    }" data-field="regAdminKey" value="${esc(f.regAdminKey)}" autocomplete="off" />`
+                  : ''
+              }
+            </div>
             <label class="tr-l">
               <input type="checkbox" data-check="regTerms" ${f.regTerms ? 'checked' : ''} />
               <span>Tengo 18 años o más y acepto los términos y el aviso de privacidad</span>
@@ -269,6 +462,7 @@ export class LobbyController {
               <input type="${f.showLogPass ? 'text' : 'password'}" maxlength="200" placeholder="Contraseña" data-field="logPass" value="${esc(f.logPass)}" autocomplete="current-password" />
               <button type="button" class="pw-eye" data-eye="showLogPass" aria-label="${f.showLogPass ? 'Ocultar contraseña' : 'Ver contraseña'}">${iconEye(f.showLogPass)}</button>
             </div>
+            <button type="button" class="tr-k" data-go="reg">¿No tienes cuenta? Crear cuenta</button>
           </div>
           <div class="tr-bar">
             <button type="submit" class="tr-b" ${this.submitting ? 'disabled' : ''}>${this.submitting ? 'Validando…' : 'Entrar'}</button>
@@ -281,33 +475,50 @@ export class LobbyController {
         <div class="tr-body">
           <div class="lb-h">
             <button type="button" class="tlg-btn" data-act="refresh" aria-label="Actualizar inicio">
-              <img class="lb-logo ${this.logoRefreshing ? 'refreshing' : ''}" src="/assets/aistudio/logo-app_a1f96350.svg" alt="spaceSUITE" width="64" height="64" />
+              <div class="lb-logo ${this.logoRefreshing ? 'refreshing' : ''}">${renderBrandIsotipoHtml({ size: 'sm', live: true, idPrefix: 'hom-iso' })}</div>
             </button>
             <div>
               <b>Hola, ${esc(u.name)}</b>
-              <small>${esc(u.plan)}</small>
+              <small>${esc(u.plan)} · ${getLatidosBalance()} Latidos</small>
             </div>
           </div>
+
+          <div class="home-primary-row">
+            <button type="button" class="tr-b" data-act="enter-suite">Entrar a mi Suite</button>
+            <button type="button" class="btn-superkey" data-act="open-superkey">
+              ${iconSuperKey()}
+              <span>SUPER KEY</span>
+            </button>
+          </div>
+
           <div class="lb-tiles">
             <button type="button" class="lb-t g" data-act="new-suite">${iconCam()}<span>Nueva SUITE</span></button>
+            <button type="button" class="lb-t" data-act="open-tienda">${iconReaction('heartbeat')}<span>Mini Tienda</span></button>
             <button type="button" class="lb-t" data-go="code">${iconInvite()}<span>Unirse</span></button>
             <button type="button" class="lb-t" data-sheet="invite">${iconSendPlane()}<span>Invitar</span></button>
             ${
               u.role === 'admin'
-                ? `<button type="button" class="lb-t" data-sheet="admin">${iconChart()}<span>Panel Admin</span></button>`
+                ? `<button type="button" class="lb-t" data-sheet="admin">${iconChart()}<span>Panel Control</span></button>`
                 : `<button type="button" class="lb-t" data-go="plans">${iconShield()}<span>Planes</span></button>`
             }
           </div>
+
           <div class="lb-card">
             <span>Mi SUITE · siempre la misma</span>
-            <b>${esc(u.suiteCode)}</b>
-            <small>Clave ${esc(u.suitePass)}</small>
+            <b>${esc(normalizeRoomCode(u.suiteCode) || u.suiteCode)}</b>
+            <small>Enlace directo ?room=${esc(normalizeRoomCode(u.suiteCode) || u.suiteCode)}</small>
             <div class="lb-card-actions">
-              <button type="button" data-act="copy-own">Copiar código y clave</button>
+              <button type="button" data-act="copy-own">Copiar enlace</button>
               <button type="button" data-sheet="invite">Compartir</button>
+              <button type="button" data-sheet="space-config">Personalizar SPACE</button>
             </div>
           </div>
-          <button type="button" class="inst" data-act="install">${iconDownload()}Instalar la app<small>Un toque</small></button>
+
+          <button type="button" class="inst" data-act="share-suite-bonus">
+            ${iconReaction('heartbeat')}
+            <span>COMPARTIR SUITE</span>
+            <small>7 días privada + 3 Latidos</small>
+          </button>
         </div>
         <div class="tr-bar">
           <div class="tr-row2">
@@ -321,13 +532,13 @@ export class LobbyController {
         <form id="lobby-code-form" style="display:flex;flex-direction:column;height:100%">
           <div class="tr-body">
             <h2>Entrar a una SUITE</h2>
-            <p>Escribe el código y la clave que te compartieron.</p>
-            <input type="text" maxlength="24" placeholder="Tu nombre en la sala" data-field="joinName" value="${esc(f.joinName)}" />
-            <input type="text" maxlength="24" placeholder="SS-SALA-XXXXXXXXXX" data-field="joinCode" value="${esc(f.joinCode)}" autocapitalize="characters" autocomplete="off" />
-            <input type="text" maxlength="8" placeholder="Clave (4 caracteres, opcional)" data-field="joinPass" value="${esc(f.joinPass)}" autocapitalize="characters" autocomplete="off" />
+            <p>Escribe el código de 6 letras o pega el enlace directo que te compartieron.</p>
+            <input type="text" maxlength="24" placeholder="Tu nombre o alias en SPACE" data-field="joinName" value="${esc(f.joinName)}" />
+            <input type="text" maxlength="160" placeholder="Ej. K9M4P2 (o pega el enlace)" data-field="joinCode" value="${esc(f.joinCode)}" autocapitalize="characters" autocomplete="off" />
+            <input type="text" maxlength="8" placeholder="Clave (solo si tiene)" data-field="joinPass" value="${esc(f.joinPass)}" autocapitalize="characters" autocomplete="off" />
           </div>
           <div class="tr-bar">
-            <button type="submit" class="tr-b">Entrar</button>
+            <button type="submit" class="tr-b">Ir a SPACE</button>
             <button type="button" class="tr-g" data-go="${u ? 'home' : 'welcome'}">Volver</button>
           </div>
         </form>
@@ -335,23 +546,40 @@ export class LobbyController {
     } else if (sc === 'plans') {
       body = `
         <div class="tr-body">
-          <h2>Planes</h2>
-          <p>Lanzamiento: 30% de descuento en todos los planes.</p>
-          <div class="tr-c tr-hot" data-act="plan-vip" role="button" tabindex="0">
-            <em><s>$29</s> <b>$20.30 USD</b> <i class="off">-30%</i> <small>/ semana</small></em>
-            <b>VIP</b>
-            <span>Salas grupales ilimitadas · sin límite de tiempo · compartir pantalla · 3 timbres y 2 Connect al día.</span>
+          <h2>Membresías</h2>
+          <p>Conexión directa, ilimitada y sin cortes en tu propio universo.</p>
+          <div class="plans-container">
+            <div class="plan-touch-card featured" role="button" tabindex="0" data-act="plan-vip">
+              <div class="plan-line-1">
+                <span class="plan-name">VIP Ilimitado</span>
+                <span class="plan-price">$20.30 USD <small>/ sem</small></span>
+              </div>
+              <div class="plan-line-2">Salas de 20 personas sin límite de tiempo y pantalla completa 720p.</div>
+              <div class="plan-line-3"><span class="badge-crimson">10 Latidos incluidos</span> · Auras exclusivas y audio espacial total.</div>
+            </div>
+
+            <div class="plan-touch-card" role="button" tabindex="0" data-act="plan-connect">
+              <div class="plan-line-1">
+                <span class="plan-name">Connect 30 Días</span>
+                <span class="plan-price">$24.50 USD <small>único</small></span>
+              </div>
+              <div class="plan-line-2">120 llamadas directas cara a cara y 150 timbres prioritarios.</div>
+              <div class="plan-line-3">Suite fija permanente con transcripción limpia en vivo y soporte ágil.</div>
+            </div>
+
+            <div class="plan-touch-card" role="button" tabindex="0" data-act="plan-shield">
+              <div class="plan-line-1">
+                <span class="plan-name">Pase Escudo 14 Días</span>
+                <span class="plan-price">$14.00 USD <small>único</small></span>
+              </div>
+              <div class="plan-line-2">Acceso completo cara a cara sin restricciones de horario.</div>
+              <div class="plan-line-3">50 timbres de cortesía y asistencia directa de SUPER KEY.</div>
+            </div>
           </div>
-          <details class="tr-more">
-            <summary>Más planes: Connect y accesos</summary>
-            <div class="tr-row"><span>Connect 14 días · 50 timbres y 30 Connect</span><em>$14.00 USD</em></div>
-            <div class="tr-row"><span>Connect 30 días · 150 timbres y 120 Connect</span><em>$24.50 USD</em></div>
-            <div class="tr-row"><span>Connect 3 meses · 400 timbres y 300 Connect</span><em>$59.00 USD</em></div>
-          </details>
         </div>
         <div class="tr-bar">
           ${!u ? `<button type="button" class="tr-b" data-go="reg">Crear cuenta gratis</button>` : ''}
-          <button type="button" class="tr-g" data-go="${u ? 'home' : 'welcome'}">Cerrar</button>
+          <button type="button" class="tr-g" data-go="${u ? 'home' : 'welcome'}">Volver</button>
         </div>
       `;
     }
@@ -364,6 +592,24 @@ export class LobbyController {
     const sh = this.sheet;
     const u = this.user;
     if (!sh) return;
+
+    if (sh === 'superkey') {
+      this.adminCtrl = new SuperKeyController(this.sheetSlot, {
+        onClose: () => this._setSheet(null),
+        onToast: (m) => this.showToast(m),
+      });
+      return;
+    }
+
+    if (sh === 'tienda') {
+      this.sheetSlot.innerHTML = renderMiniTiendaHtml();
+      bindMiniTiendaEvents(this.sheetSlot, {
+        onClose: () => this._setSheet(null),
+        onToast: (m) => this.showToast(m),
+        onOpenInvite: () => this._setSheet('invite'),
+      });
+      return;
+    }
 
     if (sh === 'admin' && u && u.role === 'admin') {
       this.adminCtrl = new AdminPanelController(this.sheetSlot, {
@@ -408,6 +654,11 @@ export class LobbyController {
       return;
     }
 
+    if (sh === 'space-config') {
+      this.sheetSlot.innerHTML = renderSpaceConfigSheetHtml(loadSpaceDraftProfile());
+      return;
+    }
+
     if (sh === 'acct' && u) {
       this.sheetSlot.innerHTML = `
         <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh">
@@ -417,7 +668,7 @@ export class LobbyController {
           <div id="sf">
             ${
               u.role === 'admin'
-                ? `<div class="row"><span><b>Panel Admin Pro</b><small>Métricas en vivo, salas y usuarios</small></span><button type="button" class="orb sm active-mint" data-lsh="admin">${iconChart()}</button></div>`
+                ? `<div class="row"><span><b>Panel de Control</b><small>Métricas en vivo, salas y usuarios</small></span><button type="button" class="orb sm is-active" data-lsh="admin">${iconChart()}</button></div>`
                 : ''
             }
             <div class="row"><span><b>Planes</b><small>Cambiar o renovar tu plan</small></span><button type="button" class="orb sm" data-lsh="plans">${iconCheck()}</button></div>
@@ -429,15 +680,15 @@ export class LobbyController {
             </div>
             ${
               this.editingName
-                ? `<form id="lobby-name-form" style="display:flex;gap:8px;margin-top:4px;margin-bottom:8px">
-                    <input id="lobby-draft-name" type="text" maxlength="24" value="${esc(this.draftName)}" placeholder="Tu nombre" style="flex:1;min-width:0;padding:10px 12px;border-radius:12px;border:1px solid var(--ln);background:var(--s2);color:var(--moon);font:500 0.92rem var(--sys);outline:none" />
-                    <button type="submit" style="padding:0 14px;border-radius:12px;border:0;background:var(--green);color:var(--ink);font:600 0.88rem var(--sys);cursor:pointer">Guardar</button>
+                ? `<form id="lobby-name-form" class="inline-name-form">
+                    <input id="lobby-draft-name" type="text" maxlength="24" value="${esc(this.draftName)}" placeholder="Tu nombre" />
+                    <button type="submit" class="tr-b inline-save-btn">Guardar</button>
                   </form>`
                 : ''
             }
-            <div class="row"><span><b>Sonidos y avisos</b><small>Sonido y vibración</small></span><button type="button" class="orb sm" data-lsh="prefs">${iconBell()}</button></div>
+            <div class="row"><span><b>Sonidos y avisos</b><small>Sonido, vibración y notificaciones</small></span><button type="button" class="orb sm" data-lsh="prefs">${iconBell()}</button></div>
             <div class="row"><span><b>Compartir la app</b><small>Envía el enlace por WhatsApp, Telegram o X</small></span><button type="button" class="orb sm" data-lsh="shareapp">${iconShare()}</button></div>
-            <div class="row"><span><b style="color:var(--danger)">Cerrar sesión</b><small>Sales de tu cuenta en este teléfono</small></span><button type="button" class="orb sm rm" data-lsh="logout">${iconLeave()}</button></div>
+            <div class="row"><span><b class="text-danger">Cerrar sesión</b><small>Sales de tu cuenta en este teléfono</small></span><button type="button" class="orb sm rm" data-lsh="logout">${iconLeave()}</button></div>
           </div>
         </section>
       `;
@@ -448,19 +699,41 @@ export class LobbyController {
     }
 
     if (sh === 'prefs') {
+      const ps = this.pushState;
+      const pushRoom = this.user?.suiteCode ? normalizeRoomCode(this.user.suiteCode) : '';
       this.sheetSlot.innerHTML = `
         <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh">
           <button type="button" class="orb sm x" data-lsh="close" aria-label="Cerrar">${iconClose()}</button>
           <h2 id="sh">Sonidos y avisos</h2>
-          <p id="sp">Controla cómo te avisa la app.</p>
+          <p id="sp">Preferencias de sonido, vibración y estructura lista para OneSignal.</p>
           <div id="sf">
             <div class="row">
               <span><b>Sonidos</b><small>Al tocar, entrar, salir y mensajes</small></span>
-              <button type="button" class="orb sm ${this.prefs.snd ? 'active-mint' : ''}" data-pref="snd">${iconBell(!this.prefs.snd)}</button>
+              <button type="button" class="orb sm ${this.prefs.snd ? 'is-active' : ''}" data-pref="snd">${iconBell(!this.prefs.snd)}</button>
             </div>
             <div class="row">
               <span><b>Vibración</b><small>Al tocar botones y cuando llega alguien</small></span>
-              <button type="button" class="orb sm ${this.prefs.vib ? 'active-mint' : ''}" data-pref="vib">${iconBell(!this.prefs.vib)}</button>
+              <button type="button" class="orb sm ${this.prefs.vib ? 'is-active' : ''}" data-pref="vib">${iconBell(!this.prefs.vib)}</button>
+            </div>
+            <div class="row">
+              <span><b>Notificaciones (OneSignal)</b><small>${
+                !ps.supported
+                  ? 'No compatible en este navegador'
+                  : ps.subscribed
+                    ? `Preferencia activa${pushRoom ? ` · Suite ${esc(pushRoom)}` : ''}`
+                    : ps.permission === 'denied'
+                      ? 'Permiso bloqueado en configuración'
+                      : 'Listo para conectar OneSignal cuando lo publiques'
+              }</small></span>
+              <button type="button" class="orb sm ${ps.subscribed ? 'is-active' : ''}" ${!ps.supported || ps.busy ? 'disabled' : ''} data-push="toggle">${iconBell(!ps.subscribed)}</button>
+            </div>
+            <div class="row">
+              <span><b>Modo discreto</b><small>${
+                ps.discrete
+                  ? 'Oculta nombres y códigos en pantalla bloqueada'
+                  : 'Muestra nombre y código en la notificación'
+              }</small></span>
+              <button type="button" class="orb sm ${ps.discrete ? 'is-active' : ''}" ${ps.busy ? 'disabled' : ''} data-push="discrete">${iconLock(!ps.discrete)}</button>
             </div>
           </div>
         </section>
@@ -548,6 +821,10 @@ export class LobbyController {
       const chk = e.target.getAttribute?.('data-check');
       if (chk) {
         this.form[chk] = Boolean(e.target.checked);
+        if (chk === 'regWantAdmin') {
+          this._adminTouched = true;
+          this._renderTour();
+        }
       }
     });
 
@@ -588,19 +865,28 @@ export class LobbyController {
       const act = actBtn.getAttribute('data-act');
       if (act === 'refresh') this._handleLobbyRefresh();
       else if (act === 'install') this._handleInstall();
+      else if (act === 'enter-suite') this._handleEnterSuite();
+      else if (act === 'open-superkey') this._setSheet('superkey');
+      else if (act === 'open-tienda') this._setSheet('tienda');
+      else if (act === 'share-suite-bonus') this._handleShareSuiteBonus();
       else if (act === 'plan-vip') this.showToast('Plan VIP seleccionado');
+      else if (act === 'plan-connect') this.showToast('Plan Connect 30 días seleccionado');
+      else if (act === 'plan-shield') this.showToast('Pase Escudo 14 días seleccionado');
       else if (act === 'resend') this._handleResendCode();
       else if (act === 'new-suite' && this.user) {
         this.onEnterRoom({
-          roomCode: this.user.suiteCode,
+          roomCode: normalizeRoomCode(this.user.suiteCode) || this.user.suiteCode,
           pass: this.user.suitePass,
           name: this.user.name,
           wantHost: true,
+          suiteProfile: loadSpaceDraftProfile(),
         });
       } else if (act === 'copy-own' && this.user) {
+        const cleanCode = normalizeRoomCode(this.user.suiteCode) || this.user.suiteCode;
+        const inviteUrl = buildRoomInviteUrl(cleanCode);
         navigator.clipboard
-          ?.writeText(`Código: ${this.user.suiteCode}\nClave: ${this.user.suitePass}`)
-          .then(() => this.showToast('Copiado'))
+          ?.writeText(inviteUrl)
+          .then(() => this.showToast('Enlace directo copiado'))
           .catch(() => this.showToast('No se pudo copiar'));
       } else if (act === 'logout') {
         this._logout();
@@ -616,6 +902,18 @@ export class LobbyController {
     });
 
     this.sheetSlot.addEventListener('click', (e) => {
+      const resetSpace = e.target.closest('[data-act="reset-space-config"]');
+      if (resetSpace) {
+        saveSpaceDraftProfile(null);
+        this.showToast('SPACE usará la escena espacial por defecto');
+        this._setSheet(null);
+        return;
+      }
+      const closeAct = e.target.closest('[data-act="close"]');
+      if (closeAct) {
+        this._setSheet(null);
+        return;
+      }
       const lsh = e.target.closest('[data-lsh]')?.getAttribute('data-lsh');
       if (lsh) {
         if (lsh === 'close') this._setSheet(null);
@@ -643,6 +941,12 @@ export class LobbyController {
         this.prefs = { ...this.prefs, [prefKey]: !this.prefs[prefKey] };
         savePrefs(this.prefs);
         this._renderSheet();
+        return;
+      }
+
+      const pushAct = e.target.closest('[data-push]')?.getAttribute('data-push');
+      if (pushAct) {
+        this._handlePushAction(pushAct);
       }
     });
 
@@ -653,6 +957,17 @@ export class LobbyController {
     });
 
     this.sheetSlot.addEventListener('submit', async (e) => {
+      if (e.target.id === 'space-config-form') {
+        e.preventDefault();
+        const title = this.sheetSlot.querySelector('#spc-title')?.value || '';
+        const description = this.sheetSlot.querySelector('#spc-desc')?.value || '';
+        const coverVideo = this.sheetSlot.querySelector('#spc-cover-vid')?.value || '';
+        const coverImage = this.sheetSlot.querySelector('#spc-cover-img')?.value || '';
+        saveSpaceDraftProfile({ title, description, coverVideo, coverImage });
+        this.showToast('Recibidor SPACE actualizado');
+        this._setSheet(null);
+        return;
+      }
       if (e.target.id !== 'lobby-name-form' || !this.user) return;
       e.preventDefault();
       const trimmed = this.draftName.trim().slice(0, 24);
@@ -694,6 +1009,45 @@ export class LobbyController {
     this.showToast('Sesión cerrada');
   }
 
+  async _handlePushAction(act) {
+    if (this.pushState.busy) return;
+    if (act === 'discrete') {
+      const nextDiscrete = !this.pushState.discrete;
+      this.pushState = { ...this.pushState, busy: true };
+      this._renderSheet();
+      const res = await toggleNotificationDiscreteMode(nextDiscrete);
+      this.pushState = { ...this.pushState, discrete: res.discrete, busy: false };
+      this._renderSheet();
+      this.showToast(
+        nextDiscrete
+          ? 'Modo discreto activo: avisos sin nombres ni códigos'
+          : 'Modo detallado activo en tus notificaciones',
+      );
+      return;
+    }
+    if (act === 'toggle') {
+      this.pushState = { ...this.pushState, busy: true };
+      this._renderSheet();
+      if (this.pushState.subscribed) {
+        await disableOneSignalNotifications();
+        this.pushState = { ...this.pushState, subscribed: false, busy: false };
+        this._renderSheet();
+        this.showToast('Notificaciones desactivadas');
+      } else {
+        const roomCode = this.user?.suiteCode ? normalizeRoomCode(this.user.suiteCode) : 'ORBIT6';
+        const res = await enableOneSignalNotifications({ roomCode, discrete: this.pushState.discrete });
+        await this._refreshPushState();
+        this.pushState = { ...this.pushState, busy: false };
+        this._renderSheet();
+        if (res.ok) {
+          this.showToast('Notificaciones listas para OneSignal');
+        } else {
+          this.showToast(res.error || 'No se pudieron activar las notificaciones');
+        }
+      }
+    }
+  }
+
   async _handleRegister() {
     const f = this.form;
     const cleanName = f.regName.trim();
@@ -717,6 +1071,8 @@ export class LobbyController {
           email: f.regEmail.trim(),
           password: f.regPass,
           dob: f.regDob,
+          wantAdmin: Boolean(f.regWantAdmin),
+          adminKey: f.regAdminKey.trim() || undefined,
         }),
       });
       const json = await res.json();
@@ -851,13 +1207,8 @@ export class LobbyController {
   }
 
   _handleJoinByCode() {
-    const cleanCode = this.form.joinCode.trim().toUpperCase().replace(/\s+/g, '');
-    if (cleanCode.length < 4) return this.showToast('Escribe el código de SUITE');
-    const normalizedCode = cleanCode.startsWith('SS-SALA-')
-      ? cleanCode
-      : cleanCode.length === 10 && /^[A-Z0-9]+$/.test(cleanCode)
-        ? `SS-SALA-${cleanCode}`
-        : cleanCode;
+    const normalizedCode = normalizeRoomCode(this.form.joinCode);
+    if (normalizedCode.length < 4) return this.showToast('Escribe un código o enlace válido');
     const finalName = this.form.joinName.trim() || this.user?.name || 'Invitado';
     this.onEnterRoom({
       roomCode: normalizedCode,

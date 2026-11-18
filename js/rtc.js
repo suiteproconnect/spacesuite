@@ -1,9 +1,13 @@
 export const ROOM_CAPACITY = 20;
 
-const ICE_SERVERS = [
+const BASE_STUN_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:stun2.l.google.com:19302' },
+  { urls: 'stun:stun3.l.google.com:19302' },
+  { urls: 'stun:stun4.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
+  { urls: 'stun:global.stun.twilio.com:3478' },
 ];
 
 function getPersistentClientId() {
@@ -53,6 +57,9 @@ export class RoomEngine {
       weakConnection: false,
       mediaNotice: null,
       lastWave: null,
+      lastReaction: null,
+      lastParticipantJoin: null,
+      facingMode: 'user',
       hostMuteNotice: null,
     };
 
@@ -63,13 +70,20 @@ export class RoomEngine {
     this.peerId = crypto.randomUUID();
     this.clientId = getPersistentClientId();
     this.connections = new Map();
+    this.dataChannels = new Map();
+    this.iceCandidateQueues = new Map();
+    this.iceRestartTimers = new Map();
+    this.iceRestartCooldowns = new Map();
+    this.runtimeIceServers = [];
 
     this.meteredSession = null;
     this.meteredMeeting = null;
     this.meteredJoined = false;
     this.meteredJoining = false;
     this.meteredSessionToPeerId = new Map();
+    this.meteredSessionRecords = new Map();
     this.meteredRemoteStreams = new Map();
+    this.notifiedMeteredSessionIds = new Set();
     this.currentQuality = '720p';
 
     this.joinConfig = null;
@@ -171,7 +185,7 @@ export class RoomEngine {
 
   _applyAdaptiveQuality() {
     if (this.state.status !== 'connected') return;
-    const targetQuality = this.state.peers.length >= 3 ? '360p' : '720p';
+    const targetQuality = this.state.peers.length >= 6 ? '540p' : '720p';
     if (this.currentQuality === targetQuality) return;
     this.currentQuality = targetQuality;
     this._emit({ videoQuality: targetQuality });
@@ -179,7 +193,7 @@ export class RoomEngine {
     const constraints =
       targetQuality === '720p'
         ? { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } }
-        : { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 24 } };
+        : { width: { ideal: 960 }, height: { ideal: 540 }, frameRate: { ideal: 24 } };
 
     if (this.meteredMeeting) {
       this.meteredMeeting.defaultVideoConstraints = { video: { ...constraints } };
@@ -192,7 +206,13 @@ export class RoomEngine {
 
   _appendMessageUnique(incoming) {
     const prev = this.state.messages;
-    if (prev.some((m) => m.id === incoming.id)) return;
+    const existingIndex = prev.findIndex((m) => m.id === incoming.id);
+    if (existingIndex >= 0) {
+      const updated = [...prev];
+      updated[existingIndex] = { ...updated[existingIndex], ...incoming };
+      this._emit({ messages: updated });
+      return;
+    }
     const dup = prev.some(
       (m) =>
         m.fromPeerId === incoming.fromPeerId &&
@@ -201,7 +221,8 @@ export class RoomEngine {
         Math.abs(m.timestamp - incoming.timestamp) < 2500,
     );
     if (dup) return;
-    this._emit({ messages: [...prev, incoming] });
+    const nextList = [...prev, incoming].sort((a, b) => a.timestamp - b.timestamp);
+    this._emit({ messages: nextList });
   }
 
   _registerTypingPeer(peerId, name, isTyping, toPeerId) {
@@ -319,27 +340,73 @@ export class RoomEngine {
     this.meteredJoined = false;
     this.meteredJoining = false;
     this.meteredSessionToPeerId.clear();
+    this.meteredSessionRecords.clear();
     this.meteredRemoteStreams.clear();
+    this.notifiedMeteredSessionIds.clear();
   }
 
-  _resolveMeteredPeerId(participant, sessionId) {
-    if (participant?.externalUserId) {
-      if (sessionId) this.meteredSessionToPeerId.set(sessionId, participant.externalUserId);
-      return participant.externalUserId;
+  _resolveMeteredPeerId(participant, sessionId, claimedPeerIds = null) {
+    const extId = participant?.externalUserId;
+    if (extId && extId !== this.peerId) {
+      if (sessionId) this.meteredSessionToPeerId.set(sessionId, extId);
+      return extId;
     }
     if (sessionId && this.meteredSessionToPeerId.has(sessionId)) {
-      return this.meteredSessionToPeerId.get(sessionId);
+      const mapped = this.meteredSessionToPeerId.get(sessionId);
+      if (mapped && mapped !== this.peerId) return mapped;
     }
-    if (participant?.name) {
-      const matched = this.state.peers.find(
-        (p) => p.peerId !== this.peerId && p.name.toLowerCase() === participant.name.toLowerCase(),
-      );
+    const remotePeers = this.state.peers.filter((p) => p.peerId !== this.peerId);
+    const pName = String(participant?.name || participant?.participantName || '').trim().toLowerCase();
+    if (pName) {
+      const matched = remotePeers.find(
+        (p) =>
+          p.name.trim().toLowerCase() === pName &&
+          (!claimedPeerIds || !claimedPeerIds.has(p.peerId)),
+      ) || remotePeers.find((p) => p.name.trim().toLowerCase() === pName);
       if (matched) {
         if (sessionId) this.meteredSessionToPeerId.set(sessionId, matched.peerId);
         return matched.peerId;
       }
     }
-    return sessionId || null;
+    return null;
+  }
+
+  _rebuildMeteredRemoteStreams() {
+    if (this.state.sfuMode !== 'metered-sfu') return;
+    const remotePeers = this.state.peers.filter((p) => p.peerId !== this.peerId);
+    const claimedPeerIds = new Set();
+    const nextRemoteStreams = {};
+    const unresolvedRecords = [];
+
+    for (const [sessionId, rec] of this.meteredSessionRecords.entries()) {
+      const resolvedPeerId = this._resolveMeteredPeerId(rec.participant, sessionId, claimedPeerIds);
+      if (resolvedPeerId && resolvedPeerId !== this.peerId && remotePeers.some((p) => p.peerId === resolvedPeerId)) {
+        claimedPeerIds.add(resolvedPeerId);
+        this.meteredRemoteStreams.set(resolvedPeerId, rec.stream);
+        nextRemoteStreams[resolvedPeerId] = new MediaStream(rec.stream.getTracks());
+        if (rec.stream.getAudioTracks().length > 0 && !this.analysers.has(resolvedPeerId)) {
+          this._attachAudioAnalyser(resolvedPeerId, rec.stream);
+        }
+      } else {
+        unresolvedRecords.push({ sessionId, rec });
+      }
+    }
+
+    const unclaimedPeers = remotePeers.filter((p) => !claimedPeerIds.has(p.peerId));
+    if (unresolvedRecords.length > 0 && unclaimedPeers.length > 0) {
+      for (let i = 0; i < Math.min(unresolvedRecords.length, unclaimedPeers.length); i++) {
+        const { sessionId, rec } = unresolvedRecords[i];
+        const targetPeer = unclaimedPeers[i];
+        this.meteredSessionToPeerId.set(sessionId, targetPeer.peerId);
+        this.meteredRemoteStreams.set(targetPeer.peerId, rec.stream);
+        nextRemoteStreams[targetPeer.peerId] = new MediaStream(rec.stream.getTracks());
+        if (rec.stream.getAudioTracks().length > 0 && !this.analysers.has(targetPeer.peerId)) {
+          this._attachAudioAnalyser(targetPeer.peerId, rec.stream);
+        }
+      }
+    }
+
+    this._emit({ remoteStreams: nextRemoteStreams });
   }
 
   async _connectMeteredSFU() {
@@ -358,7 +425,7 @@ export class RoomEngine {
       const meeting = new window.Metered.Meeting();
       this.meteredMeeting = meeting;
 
-      const initialQuality = this.state.peers.length >= 3 ? '360p' : '720p';
+      const initialQuality = this.state.peers.length >= 6 ? '540p' : '720p';
       this.currentQuality = initialQuality;
       this._emit({ videoQuality: initialQuality });
 
@@ -366,85 +433,138 @@ export class RoomEngine {
         video:
           initialQuality === '720p'
             ? { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: 30 }
-            : { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: 24 },
+            : { width: { ideal: 960 }, height: { ideal: 540 }, frameRate: 24 },
       };
 
-      const syncParticipantDirectory = (list) => {
+      const syncParticipantDirectory = (list, markNotified = false) => {
         if (!Array.isArray(list)) return;
         for (const p of list) {
-          if (p?._id && p.externalUserId) {
-            this.meteredSessionToPeerId.set(p._id, p.externalUserId);
+          const sid = p?._id || p?.participantSessionId;
+          if (sid && p.externalUserId) {
+            this.meteredSessionToPeerId.set(sid, p.externalUserId);
           }
+          if (sid && this.meteredSessionRecords.has(sid)) {
+            this.meteredSessionRecords.get(sid).participant = p;
+          }
+          if (markNotified && sid) {
+            this.notifiedMeteredSessionIds.add(sid);
+          }
+        }
+        if (this.meteredSessionRecords.size > 0) {
+          this._rebuildMeteredRemoteStreams();
         }
       };
 
       meeting.on('onlineParticipants', (list) => syncParticipantDirectory(list));
 
       meeting.on('participantJoined', (p) => {
-        if (p?._id && p.externalUserId) {
-          this.meteredSessionToPeerId.set(p._id, p.externalUserId);
+        const sessionId = p?._id || p?.participantSessionId || null;
+        if (sessionId && p?.externalUserId) {
+          this.meteredSessionToPeerId.set(sessionId, p.externalUserId);
         }
+        if (sessionId && this.meteredSessionRecords.has(sessionId)) {
+          this.meteredSessionRecords.get(sessionId).participant = p;
+          this._rebuildMeteredRemoteStreams();
+        }
+        const resolvedPeerId = this._resolveMeteredPeerId(p, sessionId);
+        const isSelfSession = Boolean(
+          (sessionId && meeting.participantSessionId && sessionId === meeting.participantSessionId) ||
+            (resolvedPeerId && resolvedPeerId === this.peerId),
+        );
+        if (isSelfSession) return;
+
+        if (sessionId) {
+          if (this.notifiedMeteredSessionIds.has(sessionId)) return;
+          this.notifiedMeteredSessionIds.add(sessionId);
+        }
+
+        const matchedPeer = resolvedPeerId
+          ? this.state.peers.find((peer) => peer.peerId === resolvedPeerId)
+          : null;
+        const participantName =
+          String(p?.name || p?.participantName || p?.participant?.name || matchedPeer?.name || '').trim() ||
+          'Nuevo participante';
+
+        this._emit({
+          lastParticipantJoin: {
+            id: crypto.randomUUID(),
+            peerId: resolvedPeerId || sessionId || null,
+            name: participantName,
+            ts: Date.now(),
+          },
+        });
       });
 
       meeting.on('participantLeft', (p) => {
-        const resolvedId = this._resolveMeteredPeerId(p, p?._id);
-        if (p?._id) this.meteredSessionToPeerId.delete(p._id);
+        const sessionId = p?._id || p?.participantSessionId || null;
+        const resolvedId = this._resolveMeteredPeerId(p, sessionId);
+        if (sessionId) {
+          this.meteredSessionToPeerId.delete(sessionId);
+          this.meteredSessionRecords.delete(sessionId);
+          this.notifiedMeteredSessionIds.delete(sessionId);
+        }
         if (resolvedId) {
           this.meteredRemoteStreams.delete(resolvedId);
           this._detachAnalyser(resolvedId);
-          if (this.state.remoteStreams[resolvedId]) {
-            const next = { ...this.state.remoteStreams };
-            delete next[resolvedId];
-            this._emit({ remoteStreams: next });
-          }
         }
+        this._rebuildMeteredRemoteStreams();
       });
 
       meeting.on('remoteTrackStarted', (ev) => {
-        if (!ev?.track || ev.participantSessionId === meeting.participantSessionId) return;
-        const resolvedPeerId = this._resolveMeteredPeerId(ev.participant, ev.participantSessionId);
-        if (!resolvedPeerId || resolvedPeerId === this.peerId) return;
+        if (!ev || ev.participantSessionId === meeting.participantSessionId) return;
+        const incomingTracks = [];
+        if (ev.track) incomingTracks.push(ev.track);
+        if (ev.stream && typeof ev.stream.getTracks === 'function') {
+          for (const stTrack of ev.stream.getTracks()) {
+            if (!incomingTracks.some((t) => t.id === stTrack.id)) incomingTracks.push(stTrack);
+          }
+        }
+        if (incomingTracks.length === 0) return;
 
-        let stream = this.meteredRemoteStreams.get(resolvedPeerId);
-        if (!stream) {
-          stream = new MediaStream();
-          this.meteredRemoteStreams.set(resolvedPeerId, stream);
+        const sessionId = ev.participantSessionId || ev.participant?._id || `sess-${crypto.randomUUID()}`;
+        let rec = this.meteredSessionRecords.get(sessionId);
+        if (!rec) {
+          rec = { sessionId, participant: ev.participant || null, stream: new MediaStream() };
+          this.meteredSessionRecords.set(sessionId, rec);
+        } else if (ev.participant) {
+          rec.participant = ev.participant;
         }
-        if (ev.track.kind === 'video') {
-          stream.getVideoTracks().forEach((old) => {
-            if (old.id !== ev.track.id) stream.removeTrack(old);
-          });
+
+        const triggerRebuild = () => this._rebuildMeteredRemoteStreams();
+        for (const tr of incomingTracks) {
+          if (tr.kind === 'video') {
+            rec.stream.getVideoTracks().forEach((old) => {
+              if (old.id !== tr.id) rec.stream.removeTrack(old);
+            });
+          } else if (tr.kind === 'audio') {
+            rec.stream.getAudioTracks().forEach((old) => {
+              if (old.id !== tr.id) rec.stream.removeTrack(old);
+            });
+          }
+          if (!rec.stream.getTracks().some((t) => t.id === tr.id)) {
+            rec.stream.addTrack(tr);
+          }
+          tr.onunmute = triggerRebuild;
+          tr.onmute = triggerRebuild;
+          tr.onended = () => {
+            rec.stream.removeTrack(tr);
+            triggerRebuild();
+          };
         }
-        if (!stream.getTracks().some((t) => t.id === ev.track.id)) {
-          stream.addTrack(ev.track);
-        }
-        if (ev.track.kind === 'audio') {
-          this._attachAudioAnalyser(resolvedPeerId, stream);
-        }
-        this._emit({
-          remoteStreams: {
-            ...this.state.remoteStreams,
-            [resolvedPeerId]: new MediaStream(stream.getTracks()),
-          },
-        });
+
+        triggerRebuild();
       });
 
       meeting.on('remoteTrackStopped', (ev) => {
-        const resolvedPeerId = this._resolveMeteredPeerId(ev?.participant, ev?.participantSessionId);
-        if (!resolvedPeerId) return;
-        const stream = this.meteredRemoteStreams.get(resolvedPeerId);
-        if (!stream) return;
+        const sessionId = ev?.participantSessionId || ev?.participant?._id || null;
+        const rec = sessionId ? this.meteredSessionRecords.get(sessionId) : null;
+        if (!rec) return;
         if (ev.type === 'video') {
-          stream.getVideoTracks().forEach((t) => stream.removeTrack(t));
+          rec.stream.getVideoTracks().forEach((t) => rec.stream.removeTrack(t));
         } else if (ev.type === 'audio') {
-          stream.getAudioTracks().forEach((t) => stream.removeTrack(t));
+          rec.stream.getAudioTracks().forEach((t) => rec.stream.removeTrack(t));
         }
-        this._emit({
-          remoteStreams: {
-            ...this.state.remoteStreams,
-            [resolvedPeerId]: new MediaStream(stream.getTracks()),
-          },
-        });
+        this._rebuildMeteredRemoteStreams();
       });
 
       meeting.on('activeSpeaker', (sp) => {
@@ -512,27 +632,50 @@ export class RoomEngine {
         accessToken: session.accessToken,
       });
 
-      syncParticipantDirectory(joinedInfo?.onlineParticipants || []);
+      syncParticipantDirectory(joinedInfo?.onlineParticipants || [], true);
       this.meteredJoined = true;
 
       const camStream = this.state.localStream;
       if (camStream) {
         if (camStream.getAudioTracks().length > 0 && typeof meeting.shareCustomAudio === 'function') {
-          await meeting.shareCustomAudio(camStream);
-          if (!this.state.self?.micOn && typeof meeting.muteLocalAudio === 'function') {
-            meeting.muteLocalAudio();
+          try {
+            await meeting.shareCustomAudio(new MediaStream(camStream.getAudioTracks()));
+            if (!this.state.self?.micOn && typeof meeting.muteLocalAudio === 'function') {
+              meeting.muteLocalAudio();
+            }
+          } catch {
+            // fallback to default audio if custom share rejects
           }
         }
-        if (camStream.getVideoTracks().length > 0 && typeof meeting.shareCustomVideoStream === 'function') {
-          const videoTrack = camStream.getVideoTracks()[0];
+        const videoTrack = camStream.getVideoTracks()[0];
+        if (videoTrack) {
           await videoTrack
             .applyConstraints(
               initialQuality === '720p'
                 ? { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } }
-                : { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 24 } },
+                : { width: { ideal: 960 }, height: { ideal: 540 }, frameRate: { ideal: 24 } },
             )
             .catch(() => {});
-          await meeting.shareCustomVideoStream(camStream);
+          let videoShared = false;
+          if (typeof meeting.shareCustomVideoTrack === 'function') {
+            try {
+              await meeting.shareCustomVideoTrack(videoTrack);
+              videoShared = true;
+            } catch {
+              videoShared = false;
+            }
+          }
+          if (!videoShared && typeof meeting.shareCustomVideoStream === 'function') {
+            try {
+              await meeting.shareCustomVideoStream(new MediaStream([videoTrack]));
+              videoShared = true;
+            } catch {
+              videoShared = false;
+            }
+          }
+          if (!videoShared && typeof meeting.startVideo === 'function') {
+            await meeting.startVideo().catch(() => {});
+          }
           if (!this.state.self?.camOn && typeof meeting.pauseLocalVideo === 'function') {
             meeting.pauseLocalVideo();
           }
@@ -546,13 +689,138 @@ export class RoomEngine {
     }
   }
 
+  _getIceServers() {
+    const merged = [...BASE_STUN_SERVERS];
+    const seen = new Set(merged.map((s) => JSON.stringify(s)));
+    const extraLists = [
+      Array.isArray(this.runtimeIceServers) ? this.runtimeIceServers : [],
+      typeof window !== 'undefined' && Array.isArray(window.__SPACESUITE_ICE_SERVERS__)
+        ? window.__SPACESUITE_ICE_SERVERS__
+        : [],
+    ];
+    for (const list of extraLists) {
+      for (const item of list) {
+        if (!item || !item.urls) continue;
+        const urlsStr = Array.isArray(item.urls) ? item.urls.join(',') : String(item.urls);
+        if (/turns?:/i.test(urlsStr) && (!item.username || !item.credential)) {
+          continue;
+        }
+        const normalized = {
+          urls: item.urls,
+          ...(item.username ? { username: String(item.username) } : {}),
+          ...(item.credential ? { credential: String(item.credential) } : {}),
+        };
+        const key = JSON.stringify(normalized);
+        if (!seen.has(key)) {
+          seen.add(key);
+          merged.push(normalized);
+        }
+      }
+    }
+    return merged;
+  }
+
+  _enqueueIceCandidate(remotePeerId, candidate) {
+    if (!remotePeerId || !candidate) return;
+    let queue = this.iceCandidateQueues.get(remotePeerId);
+    if (!queue) {
+      queue = [];
+      this.iceCandidateQueues.set(remotePeerId, queue);
+    }
+    queue.push(candidate);
+  }
+
+  async _flushIceCandidateQueue(remotePeerId) {
+    const entry = this.connections.get(remotePeerId);
+    const queue = this.iceCandidateQueues.get(remotePeerId);
+    if (!entry || !entry.pc.remoteDescription || !queue || queue.length === 0) return;
+    this.iceCandidateQueues.set(remotePeerId, []);
+    for (const candidate of queue) {
+      try {
+        await entry.pc.addIceCandidate(candidate);
+      } catch {
+        // ignore stale ICE candidate
+      }
+    }
+  }
+
+  _clearIceRestartTimer(remotePeerId) {
+    const timer = this.iceRestartTimers.get(remotePeerId);
+    if (timer) {
+      window.clearTimeout(timer);
+      this.iceRestartTimers.delete(remotePeerId);
+    }
+  }
+
+  _scheduleIceRestart(remotePeerId, immediate = false) {
+    if (this._destroyed || this.manualLeave || this.state.status !== 'connected') return;
+    const entry = this.connections.get(remotePeerId);
+    if (!entry) return;
+    if (immediate) {
+      this._clearIceRestartTimer(remotePeerId);
+      this._performIceRestart(remotePeerId);
+      return;
+    }
+    if (this.iceRestartTimers.has(remotePeerId)) return;
+    const timer = window.setTimeout(() => {
+      this.iceRestartTimers.delete(remotePeerId);
+      const currentEntry = this.connections.get(remotePeerId);
+      if (!currentEntry) return;
+      const iceSt = currentEntry.pc.iceConnectionState;
+      const connSt = currentEntry.pc.connectionState;
+      if (iceSt === 'disconnected' || iceSt === 'failed' || connSt === 'disconnected' || connSt === 'failed') {
+        this._performIceRestart(remotePeerId);
+      }
+    }, 2200);
+    this.iceRestartTimers.set(remotePeerId, timer);
+  }
+
+  async _performIceRestart(remotePeerId) {
+    if (this._destroyed || this.manualLeave || this.state.status !== 'connected') return;
+    const entry = this.connections.get(remotePeerId);
+    if (!entry || entry.makingOffer) return;
+    const now = Date.now();
+    const lastRestart = this.iceRestartCooldowns.get(remotePeerId) || 0;
+    if (now - lastRestart < 4500) return;
+    this.iceRestartCooldowns.set(remotePeerId, now);
+
+    try {
+      entry.makingOffer = true;
+      if (typeof entry.pc.restartIce === 'function') {
+        entry.pc.restartIce();
+      }
+      const offer = await entry.pc.createOffer({ iceRestart: true });
+      await entry.pc.setLocalDescription(offer);
+      if (entry.pc.localDescription) {
+        this._sendSignal({
+          type: 'webrtc:offer',
+          to: remotePeerId,
+          sdp: entry.pc.localDescription.toJSON(),
+        });
+      }
+    } catch {
+      // ignore ICE restart contention
+    } finally {
+      entry.makingOffer = false;
+    }
+  }
+
   _closePeerConnection(remotePeerId) {
+    this._clearIceRestartTimer(remotePeerId);
+    this.iceCandidateQueues.delete(remotePeerId);
+    this.iceRestartCooldowns.delete(remotePeerId);
+    const dc = this.dataChannels.get(remotePeerId);
+    if (dc) {
+      try { dc.close(); } catch (_) {}
+      this.dataChannels.delete(remotePeerId);
+    }
     const entry = this.connections.get(remotePeerId);
     if (entry) {
       entry.pc.onicecandidate = null;
       entry.pc.ontrack = null;
       entry.pc.onnegotiationneeded = null;
       entry.pc.oniceconnectionstatechange = null;
+      entry.pc.onconnectionstatechange = null;
       entry.pc.close();
       this.connections.delete(remotePeerId);
     }
@@ -566,43 +834,86 @@ export class RoomEngine {
   }
 
   _closeAllConnections() {
+    for (const timer of this.iceRestartTimers.values()) {
+      window.clearTimeout(timer);
+    }
+    this.iceRestartTimers.clear();
+    this.iceCandidateQueues.clear();
+    this.iceRestartCooldowns.clear();
     for (const pid of Array.from(this.connections.keys())) {
       this._closePeerConnection(pid);
     }
+    for (const dc of this.dataChannels.values()) {
+      try { dc.close(); } catch (_) {}
+    }
+    this.dataChannels.clear();
     this._closeMeteredMeeting();
     this._emit({ remoteStreams: {}, weakConnection: false });
+  }
+
+  _setupDataChannel(remotePeerId, channel) {
+    if (!channel) return;
+    this.dataChannels.set(remotePeerId, channel);
+    channel.onclose = () => {
+      this.dataChannels.delete(remotePeerId);
+    };
+    channel.onerror = () => {
+      this.dataChannels.delete(remotePeerId);
+    };
+    channel.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data);
+        if (data.type === 'chat:message' && data.message) {
+          this._appendMessageUnique(data.message);
+        } else if (data.type === 'peer:name_updated' && data.peerId && data.name) {
+          this._emit({
+            peers: this.state.peers.map((p) =>
+              p.peerId === data.peerId
+                ? { ...p, name: data.name, initial: data.initial || data.name[0]?.toUpperCase() || 'S' }
+                : p,
+            ),
+          });
+        } else if (data.type === 'chat:typing') {
+          this._registerTypingPeer(data.peerId, data.name, data.isTyping, data.toPeerId);
+        }
+      } catch {
+        // ignore malformed frame
+      }
+    };
   }
 
   _createPeerConnection(remotePeerId, initiateOffer) {
     const existing = this.connections.get(remotePeerId);
     if (existing) return existing;
 
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    const pc = new RTCPeerConnection({
+      iceServers: this._getIceServers(),
+      iceCandidatePoolSize: 4,
+      bundlePolicy: 'max-bundle',
+    });
     const remoteStream = new MediaStream();
     const entry = {
       pc,
       makingOffer: false,
       ignoreOffer: false,
-      pendingCandidates: [],
+      canNegotiate: Boolean(initiateOffer),
       stream: remoteStream,
     };
     this.connections.set(remotePeerId, entry);
 
-    const camStream = this.state.localStream;
-    const scrStream = this.state.screenStream;
-
-    if (camStream) {
-      for (const audioTrack of camStream.getAudioTracks()) {
-        pc.addTrack(audioTrack, camStream);
+    if (initiateOffer) {
+      try {
+        const dc = pc.createDataChannel('spacesuite-chat', { ordered: true });
+        this._setupDataChannel(remotePeerId, dc);
+      } catch {
+        // ignore
       }
     }
-
-    const activeVideoTrack =
-      scrStream?.getVideoTracks()[0] || camStream?.getVideoTracks()[0] || null;
-    if (activeVideoTrack) {
-      const ownerStream = scrStream?.getVideoTracks()[0] ? scrStream : camStream;
-      pc.addTrack(activeVideoTrack, ownerStream);
-    }
+    pc.ondatachannel = (ev) => {
+      if (ev.channel) {
+        this._setupDataChannel(remotePeerId, ev.channel);
+      }
+    };
 
     pc.onicecandidate = ({ candidate }) => {
       if (candidate) {
@@ -614,14 +925,19 @@ export class RoomEngine {
       }
     };
 
-    pc.ontrack = ({ track }) => {
-      if (track.kind === 'video') {
-        entry.stream.getVideoTracks().forEach((old) => {
-          if (old.id !== track.id) entry.stream.removeTrack(old);
-        });
-      }
-      if (!entry.stream.getTracks().some((t) => t.id === track.id)) {
-        entry.stream.addTrack(track);
+    pc.ontrack = ({ track, streams }) => {
+      const incoming = streams?.[0]?.getTracks?.() || [];
+      const toAttach = incoming.length > 0 ? incoming : [track];
+      for (const tr of toAttach) {
+        if (!tr) continue;
+        if (tr.kind === 'video') {
+          entry.stream.getVideoTracks().forEach((old) => {
+            if (old.id !== tr.id) entry.stream.removeTrack(old);
+          });
+        }
+        if (!entry.stream.getTracks().some((t) => t.id === tr.id)) {
+          entry.stream.addTrack(tr);
+        }
       }
       if (track.kind === 'audio') {
         this._attachAudioAnalyser(remotePeerId, entry.stream);
@@ -639,16 +955,28 @@ export class RoomEngine {
         emitUpdatedStream();
       };
       track.onunmute = emitUpdatedStream;
+      track.onmute = emitUpdatedStream;
       emitUpdatedStream();
     };
 
-    pc.oniceconnectionstatechange = () => {
-      if (pc.iceConnectionState === 'failed') pc.restartIce();
+    const handleIceTransition = () => {
+      const iceSt = pc.iceConnectionState;
+      const connSt = pc.connectionState;
+      if (iceSt === 'connected' || iceSt === 'completed' || connSt === 'connected') {
+        this._clearIceRestartTimer(remotePeerId);
+      } else if (iceSt === 'failed' || connSt === 'failed') {
+        this._scheduleIceRestart(remotePeerId, true);
+      } else if (iceSt === 'disconnected' || connSt === 'disconnected') {
+        this._scheduleIceRestart(remotePeerId, false);
+      }
       this._refreshWeakConnection();
     };
 
+    pc.oniceconnectionstatechange = handleIceTransition;
+    pc.onconnectionstatechange = handleIceTransition;
+
     pc.onnegotiationneeded = async () => {
-      if (entry.makingOffer || pc.signalingState !== 'stable') return;
+      if (!entry.canNegotiate || entry.makingOffer || pc.signalingState !== 'stable') return;
       try {
         entry.makingOffer = true;
         await pc.setLocalDescription();
@@ -666,6 +994,22 @@ export class RoomEngine {
       }
     };
 
+    const camStream = this.state.localStream;
+    const scrStream = this.state.screenStream;
+
+    if (camStream) {
+      for (const audioTrack of camStream.getAudioTracks()) {
+        pc.addTrack(audioTrack, camStream);
+      }
+    }
+
+    const activeVideoTrack =
+      scrStream?.getVideoTracks()[0] || camStream?.getVideoTracks()[0] || null;
+    if (activeVideoTrack) {
+      const ownerStream = scrStream?.getVideoTracks()[0] ? scrStream : camStream;
+      pc.addTrack(activeVideoTrack, ownerStream);
+    }
+
     if (initiateOffer && !camStream && !scrStream) {
       pc.addTransceiver('audio', { direction: 'recvonly' });
       pc.addTransceiver('video', { direction: 'recvonly' });
@@ -674,15 +1018,18 @@ export class RoomEngine {
     return entry;
   }
 
-  async _acquireLocalMedia(wantMic, wantCam) {
+  async _acquireLocalMedia(wantMic, wantCam, facingMode = 'user') {
     if (!navigator.mediaDevices?.getUserMedia) {
-      this._emit({ mediaNotice: 'Este navegador no permite acceso a cámara o micrófono.' });
       return { stream: null, mic: false, cam: false };
     }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-        video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
+        video: {
+          facingMode: { ideal: facingMode === 'environment' ? 'environment' : 'user' },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
       });
       stream.getAudioTracks().forEach((t) => {
         t.enabled = wantMic;
@@ -693,8 +1040,18 @@ export class RoomEngine {
       this._emit({ mediaNotice: null });
       return { stream, mic: wantMic, cam: wantCam };
     } catch {
-      this._emit({ mediaNotice: 'Se requiere cámara activa para ingresar a la sala.' });
-      return { stream: null, mic: false, cam: false };
+      try {
+        const audioOnly = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+          video: false,
+        });
+        audioOnly.getAudioTracks().forEach((t) => {
+          t.enabled = wantMic;
+        });
+        return { stream: audioOnly, mic: wantMic, cam: false };
+      } catch {
+        return { stream: null, mic: false, cam: false };
+      }
     }
   }
 
@@ -719,6 +1076,21 @@ export class RoomEngine {
         return;
       }
 
+      if (ev.eventType === 'peer:name_updated' && ev.payload?.peerId && ev.payload?.name) {
+        const { peerId: pid, name, initial } = ev.payload;
+        this._emit({
+          peers: this.state.peers.map((p) =>
+            p.peerId === pid ? { ...p, name, initial: initial || name[0]?.toUpperCase() || 'S' } : p,
+          ),
+        });
+        continue;
+      }
+
+      if (ev.eventType === 'chat:message' && ev.payload?.message) {
+        this._appendMessageUnique(ev.payload.message);
+        continue;
+      }
+
       if (ev.eventType === 'chat:typing') {
         this._registerTypingPeer(
           String(ev.payload?.peerId || ''),
@@ -734,6 +1106,16 @@ export class RoomEngine {
         continue;
       }
 
+      if (ev.eventType === 'reaction:received' && ev.payload?.reaction) {
+        this._emit({ lastReaction: ev.payload.reaction });
+        continue;
+      }
+
+      if (ev.eventType === 'subtitle:received' && ev.payload?.subtitle) {
+        this._emit({ lastSubtitle: ev.payload.subtitle });
+        continue;
+      }
+
       if (ev.eventType === 'host:mute') {
         if (this.state.localStream) {
           this.state.localStream.getAudioTracks().forEach((t) => {
@@ -746,7 +1128,7 @@ export class RoomEngine {
         this._emit({
           self: this.state.self ? { ...this.state.self, micOn: false } : null,
           peers: this.state.peers.map((p) => (p.peerId === this.peerId ? { ...p, micOn: false } : p)),
-          hostMuteNotice: `${String(ev.payload?.byName || 'El anfitrión')} silenció tu micrófono.`,
+          hostMuteNotice: `${String(ev.payload?.byName || 'En la Suite')} silenció tu micrófono.`,
         });
         continue;
       }
@@ -763,11 +1145,9 @@ export class RoomEngine {
         entry.ignoreOffer = !polite && offerCollision;
         if (entry.ignoreOffer) continue;
         try {
+          entry.canNegotiate = true;
           await entry.pc.setRemoteDescription(sdp);
-          for (const cand of entry.pendingCandidates) {
-            await entry.pc.addIceCandidate(cand);
-          }
-          entry.pendingCandidates = [];
+          await this._flushIceCandidateQueue(from);
           await entry.pc.setLocalDescription();
           if (entry.pc.localDescription) {
             this._sendSignal({
@@ -788,11 +1168,9 @@ export class RoomEngine {
         const entry = this.connections.get(from);
         if (!entry || !sdp) continue;
         try {
+          entry.canNegotiate = true;
           await entry.pc.setRemoteDescription(sdp);
-          for (const cand of entry.pendingCandidates) {
-            await entry.pc.addIceCandidate(cand);
-          }
-          entry.pendingCandidates = [];
+          await this._flushIceCandidateQueue(from);
         } catch {
           // ignore
         }
@@ -802,17 +1180,9 @@ export class RoomEngine {
       if (ev.eventType === 'webrtc:ice') {
         const from = String(ev.payload?.from || '');
         const candidate = ev.payload?.candidate;
-        const entry = this.connections.get(from);
-        if (!entry || !candidate) continue;
-        try {
-          if (entry.pc.remoteDescription) {
-            await entry.pc.addIceCandidate(candidate);
-          } else {
-            entry.pendingCandidates.push(candidate);
-          }
-        } catch {
-          // ignore
-        }
+        if (!from || !candidate) continue;
+        this._enqueueIceCandidate(from, candidate);
+        await this._flushIceCandidateQueue(from);
       }
     }
   }
@@ -837,8 +1207,59 @@ export class RoomEngine {
     this._emit({ peers: nextPeers, typingPeers: nextTyping });
     this._applyAdaptiveQuality();
 
-    if (this.state.sfuMode !== 'metered-sfu') {
+    if (this.state.status === 'connected' && this.state.sfuMode === 'metered-sfu') {
+      if (this.meteredSessionRecords.size > 0) {
+        this._rebuildMeteredRemoteStreams();
+      }
+    } else if (this.state.status === 'connected') {
       for (const remote of incomingPeers) {
+        if (remote.peerId === this.peerId) continue;
+        if (!this.connections.has(remote.peerId)) {
+          this._createPeerConnection(remote.peerId, this.peerId < remote.peerId);
+        }
+      }
+    }
+  }
+
+  async _startMediaTransportOnAdmit(peersToConnect = []) {
+    if (this._destroyed || this.manualLeave || this.state.status !== 'connected') return;
+    try {
+      const res = await fetch('/api/metered/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          roomCode: this.roomCode,
+          peerId: this.peerId,
+          name: this.joinConfig?.name || this.state.self?.name || 'Invitado',
+          isAdmin: Boolean(this.joinConfig?.wantHost),
+        }),
+      });
+      const sessionJson = await res.json().catch(() => null);
+      if (sessionJson && Array.isArray(sessionJson.iceServers)) {
+        this.runtimeIceServers = sessionJson.iceServers;
+      }
+      if (!res.ok || !sessionJson || sessionJson.ok === false) {
+        this.meteredSession = null;
+        this._emit({ sfuMode: 'p2p-fallback' });
+      } else {
+        this.meteredSession = sessionJson;
+        this._emit({
+          roomCapacity: sessionJson.maxParticipants || ROOM_CAPACITY,
+          sfuMode: sessionJson.configured ? 'metered-sfu' : 'p2p-fallback',
+        });
+      }
+    } catch {
+      this.meteredSession = null;
+      this._emit({ sfuMode: 'p2p-fallback' });
+    }
+
+    if (this._destroyed || this.manualLeave || this.state.status !== 'connected') return;
+
+    if (this.state.sfuMode === 'metered-sfu') {
+      this._connectMeteredSFU();
+    } else {
+      const list = Array.isArray(peersToConnect) && peersToConnect.length > 0 ? peersToConnect : this.state.peers;
+      for (const remote of list) {
         if (remote.peerId === this.peerId) continue;
         if (!this.connections.has(remote.peerId)) {
           this._createPeerConnection(remote.peerId, this.peerId < remote.peerId);
@@ -878,21 +1299,20 @@ export class RoomEngine {
             if (this.manualLeave) return;
           }
           if (data.inRoom) {
-            if (data.status === 'connected' && this.state.status === 'waiting') {
-              this._emit({ status: 'connected' });
-              if (this.state.sfuMode === 'metered-sfu') {
-                this._connectMeteredSFU();
-              }
-            }
+            const justAdmitted = data.status === 'connected' && this.state.status === 'waiting';
             const patch = {};
+            if (justAdmitted) patch.status = 'connected';
             if (data.self) patch.self = data.self;
             if (data.meta) patch.meta = data.meta;
             if (Array.isArray(data.waiting)) patch.waiting = data.waiting;
             if (Object.keys(patch).length > 0) this._emit(patch);
-            if (Array.isArray(data.peers)) this._reconcilePeers(data.peers);
             if (Array.isArray(data.messages)) {
               for (const m of data.messages) this._appendMessageUnique(m);
             }
+            if (justAdmitted) {
+              await this._startMediaTransportOnAdmit(Array.isArray(data.peers) ? data.peers : []);
+            }
+            if (Array.isArray(data.peers)) this._reconcilePeers(data.peers);
           }
         }
       } catch {
@@ -921,13 +1341,17 @@ export class RoomEngine {
           micOn: joinPayload.micOn,
           camOn: joinPayload.camOn,
           wantHost: joinPayload.wantHost,
+          suiteProfile: joinPayload.suiteProfile || undefined,
         }),
       });
       const msg = await res.json();
       if (typeof msg.lastEventId === 'number') this.lastEventId = msg.lastEventId;
 
       if (msg.type === 'room:waiting') {
-        this._emit({ status: 'waiting' });
+        this._emit({
+          status: 'waiting',
+          ...(msg.meta ? { meta: msg.meta } : {}),
+        });
         this.pollActive = true;
         this._schedulePoll(joinPayload.roomCode);
         return;
@@ -955,14 +1379,7 @@ export class RoomEngine {
         });
         this._applyAdaptiveQuality();
 
-        if (this.state.sfuMode === 'metered-sfu') {
-          this._connectMeteredSFU();
-        } else {
-          for (const remote of initialPeers) {
-            if (remote.peerId === msg.self.peerId) continue;
-            this._createPeerConnection(remote.peerId, msg.self.peerId < remote.peerId);
-          }
-        }
+        await this._startMediaTransportOnAdmit(initialPeers);
 
         this.pollActive = true;
         this._schedulePoll(joinPayload.roomCode);
@@ -992,16 +1409,18 @@ export class RoomEngine {
 
     let media;
     const pre = opts.precheckedStream;
-    if (pre && pre.getVideoTracks().some((t) => t.readyState === 'live')) {
+    const requestedFacing = opts.facingMode === 'environment' ? 'environment' : 'user';
+    if (pre && pre.getTracks().some((t) => t.readyState === 'live')) {
       pre.getAudioTracks().forEach((t) => {
         t.enabled = opts.micOn;
       });
       pre.getVideoTracks().forEach((t) => {
-        t.enabled = opts.camOn;
+        t.enabled = Boolean(opts.camOn);
       });
-      media = { stream: pre, mic: opts.micOn, cam: opts.camOn };
+      const hasLivePreCam = pre.getVideoTracks().some((t) => t.readyState === 'live' && t.enabled);
+      media = { stream: pre, mic: opts.micOn, cam: Boolean(opts.camOn && hasLivePreCam) };
     } else {
-      media = await this._acquireLocalMedia(opts.micOn, opts.camOn);
+      media = await this._acquireLocalMedia(opts.micOn, opts.camOn, requestedFacing);
     }
 
     const hasVideo = Boolean(
@@ -1015,47 +1434,7 @@ export class RoomEngine {
       return false;
     }
 
-    try {
-      const res = await fetch('/api/metered/session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          roomCode: opts.roomCode,
-          peerId: this.peerId,
-          name: opts.name,
-          isAdmin: Boolean(opts.wantHost),
-        }),
-      });
-      const sessionJson = await res.json();
-      if (res.status === 403) {
-        if (media.stream && media.stream !== opts.precheckedStream) {
-          media.stream.getTracks().forEach((t) => t.stop());
-        }
-        this._emit({
-          rejectionMessage: sessionJson.error || 'La sala alcanzó su capacidad máxima.',
-          status: 'rejected',
-        });
-        return false;
-      }
-      if (!res.ok || sessionJson.ok === false) {
-        this.meteredSession = null;
-        this._emit({
-          sfuMode: 'p2p-fallback',
-          mediaNotice: 'SFU no disponible; usando enlace directo.',
-        });
-      } else {
-        this.meteredSession = sessionJson;
-        this._emit({
-          roomCapacity: sessionJson.maxParticipants || ROOM_CAPACITY,
-          sfuMode: sessionJson.configured ? 'metered-sfu' : 'p2p-fallback',
-        });
-      }
-    } catch {
-      this.meteredSession = null;
-      this._emit({ sfuMode: 'p2p-fallback' });
-    }
-
-    this._emit({ localStream: media.stream });
+    this._emit({ localStream: media.stream, facingMode: requestedFacing });
     if (media.stream) {
       this._attachAudioAnalyser('local', media.stream);
     }
@@ -1067,6 +1446,7 @@ export class RoomEngine {
       micOn: media.mic,
       camOn: media.cam,
       wantHost: opts.wantHost,
+      suiteProfile: opts.suiteProfile || null,
     };
     await this._connectRoomChannel(this.joinConfig);
     return true;
@@ -1153,6 +1533,23 @@ export class RoomEngine {
         }
       } else if (newTrack && ownerStream) {
         entry.pc.addTrack(newTrack, ownerStream);
+        if (entry.pc.signalingState === 'stable' && !entry.makingOffer) {
+          try {
+            entry.makingOffer = true;
+            await entry.pc.setLocalDescription();
+            if (entry.pc.localDescription) {
+              this._sendSignal({
+                type: 'webrtc:offer',
+                to: remotePeerId,
+                sdp: entry.pc.localDescription.toJSON(),
+              });
+            }
+          } catch {
+            // ignore
+          } finally {
+            entry.makingOffer = false;
+          }
+        }
       }
     }
   }
@@ -1207,9 +1604,9 @@ export class RoomEngine {
 
     if (nextCam && (!this.state.localStream || this.state.localStream.getVideoTracks().length === 0)) {
       try {
-        const target = this.currentQuality === '720p' ? { w: 1280, h: 720 } : { w: 640, h: 360 };
+        const target = this.currentQuality === '720p' ? { w: 1280, h: 720 } : { w: 960, h: 540 };
         const camOnly = await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: target.w }, height: { ideal: target.h }, facingMode: 'user' },
+          video: { width: { ideal: target.w }, height: { ideal: target.h }, facingMode: this.state.facingMode || 'user' },
         });
         const newTrack = camOnly.getVideoTracks()[0];
         let nextStream;
@@ -1259,9 +1656,9 @@ export class RoomEngine {
     let camTrack = this.state.localStream?.getVideoTracks().find((t) => t.readyState === 'live') || null;
     if (!camTrack && this.state.self?.camOn && navigator.mediaDevices?.getUserMedia) {
       try {
-        const target = this.currentQuality === '720p' ? { w: 1280, h: 720 } : { w: 640, h: 360 };
+        const target = this.currentQuality === '720p' ? { w: 1280, h: 720 } : { w: 960, h: 540 };
         const camOnly = await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: target.w }, height: { ideal: target.h }, facingMode: 'user' },
+          video: { width: { ideal: target.w }, height: { ideal: target.h }, facingMode: this.state.facingMode || 'user' },
         });
         camTrack = camOnly.getVideoTracks()[0] || null;
         if (camTrack) {
@@ -1355,9 +1752,87 @@ export class RoomEngine {
     this._sendSignal({ type: 'peer:state', patch: { handRaised: nextHand } });
   }
 
+  updateMyName(newName) {
+    const cleanName = String(newName || '').trim().slice(0, 32);
+    if (!cleanName || cleanName.length < 2) return;
+    const initial = cleanName[0].toUpperCase();
+    const current = this.state.self;
+    if (!current) return;
+
+    const updatedSelf = { ...current, name: cleanName, initial };
+    this._emit({
+      self: updatedSelf,
+      peers: this.state.peers.map((p) => (p.peerId === this.peerId ? { ...p, name: cleanName, initial } : p)),
+    });
+
+    const payload = JSON.stringify({
+      type: 'peer:name_updated',
+      peerId: this.peerId,
+      name: cleanName,
+      initial,
+    });
+    for (const dc of this.dataChannels.values()) {
+      if (dc.readyState === 'open') {
+        try { dc.send(payload); } catch (_) {}
+      }
+    }
+
+    if (
+      this.state.sfuMode === 'metered-sfu' &&
+      this.meteredMeeting &&
+      this.meteredJoined &&
+      typeof this.meteredMeeting.setParticipantName === 'function'
+    ) {
+      try { this.meteredMeeting.setParticipantName(cleanName); } catch (_) {}
+    }
+
+    this._sendSignal({
+      type: 'peer:state',
+      patch: { name: cleanName },
+    });
+  }
+
   sendChat(text, toPeerId = null) {
     const cleanText = String(text || '').trim().slice(0, 500);
     if (!cleanText) return;
+    const msgId = crypto.randomUUID();
+    const now = Date.now();
+    const myName = this.state.self?.name || 'Tú';
+    const myPeerId = this.peerId;
+
+    const localMsg = {
+      id: msgId,
+      roomCode: this.roomCode,
+      fromPeerId: myPeerId,
+      fromName: myName,
+      toPeerId: toPeerId || null,
+      text: cleanText,
+      timestamp: now,
+      status: 'Enviado',
+    };
+
+    // 1. Add immediately to sender's local history (instant UX!)
+    this._appendMessageUnique(localMsg);
+
+    // 2. Broadcast via RTCDataChannels
+    const wirePayload = JSON.stringify({
+      type: 'chat:message',
+      message: localMsg,
+    });
+    if (toPeerId) {
+      const dc = this.dataChannels.get(toPeerId);
+      if (dc && dc.readyState === 'open') {
+        try { dc.send(wirePayload); } catch (_) {}
+      }
+    } else {
+      for (const dc of this.dataChannels.values()) {
+        if (dc.readyState === 'open') {
+          try { dc.send(wirePayload); } catch (_) {}
+        }
+      }
+    }
+
+    // 3. Send via Metered SFU if active
     if (
       !toPeerId &&
       this.state.sfuMode === 'metered-sfu' &&
@@ -1371,7 +1846,15 @@ export class RoomEngine {
         // ignore
       }
     }
-    this._sendSignal({ type: 'chat:send', text: cleanText, toPeerId });
+
+    // 4. Room API fallback
+    this._sendSignal({
+      type: 'chat:send',
+      text: cleanText,
+      toPeerId,
+      messageId: msgId,
+      timestamp: now,
+    });
     this._sendSignal({ type: 'chat:typing', isTyping: false, toPeerId });
   }
 
@@ -1400,6 +1883,91 @@ export class RoomEngine {
     this._sendSignal({ type: 'wave:send', toPeerId });
   }
 
+  sendReaction(kind) {
+    this._sendSignal({ type: 'reaction:send', kind });
+  }
+
+  broadcastSubtitle(text) {
+    this._sendSignal({ type: 'subtitle:broadcast', text });
+  }
+
+  sendInteractive(action, payload = {}) {
+    this._sendSignal({ type: 'room:interactive', action, payload });
+  }
+
+  updateSuiteProfile(profile) {
+    this._sendSignal({
+      type: 'room:interactive',
+      action: 'suite:profile',
+      payload: profile || {},
+    });
+  }
+
+  async flipCamera() {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      this._emit({ mediaNotice: 'Tu navegador no permite cambiar de cámara.' });
+      return false;
+    }
+    const prevFacing = this.state.facingMode === 'environment' ? 'environment' : 'user';
+    const nextFacing = prevFacing === 'user' ? 'environment' : 'user';
+    const target = this.currentQuality === '720p' ? { w: 1280, h: 720 } : { w: 960, h: 540 };
+
+    let nextCamStream;
+    try {
+      nextCamStream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          width: { ideal: target.w },
+          height: { ideal: target.h },
+          facingMode: { exact: nextFacing },
+        },
+        audio: false,
+      });
+    } catch {
+      try {
+        nextCamStream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            width: { ideal: target.w },
+            height: { ideal: target.h },
+            facingMode: { ideal: nextFacing },
+          },
+          audio: false,
+        });
+      } catch {
+        this._emit({ mediaNotice: 'Solo se detectó una cámara activa en este dispositivo.' });
+        return false;
+      }
+    }
+
+    const newTrack = nextCamStream.getVideoTracks()[0];
+    if (!newTrack) {
+      nextCamStream.getTracks().forEach((t) => t.stop());
+      this._emit({ mediaNotice: 'No fue posible cambiar de cámara.' });
+      return false;
+    }
+
+    const prevStream = this.state.localStream;
+    const wantCam = Boolean(this.state.self?.camOn ?? true);
+    newTrack.enabled = wantCam;
+
+    let mergedStream;
+    if (prevStream) {
+      prevStream.getVideoTracks().forEach((old) => {
+        prevStream.removeTrack(old);
+        old.stop();
+      });
+      prevStream.addTrack(newTrack);
+      mergedStream = new MediaStream(prevStream.getTracks());
+    } else {
+      mergedStream = nextCamStream;
+    }
+
+    this._emit({ localStream: mergedStream, facingMode: nextFacing, mediaNotice: null });
+    if (!this.state.screenStream) {
+      await this._replaceVideoTrackOnPeers(newTrack, mergedStream, false);
+    }
+    return true;
+  }
+
   hostAction(action, opts = {}) {
     this._sendSignal({
       type: 'host:action',
@@ -1419,7 +1987,7 @@ export class RoomEngine {
     if (this.state.localStream) {
       this.state.localStream.getTracks().forEach((t) => t.stop());
     }
-    this._emit({ localStream: media.stream });
+    this._emit({ localStream: media.stream, facingMode: 'user' });
     this._attachAudioAnalyser('local', media.stream);
 
     if (this.state.sfuMode === 'metered-sfu' && this.meteredMeeting && this.meteredJoined) {
@@ -1468,8 +2036,16 @@ export class RoomEngine {
     if (this.state.lastWave) this._emit({ lastWave: null });
   }
 
+  clearReaction() {
+    if (this.state.lastReaction) this._emit({ lastReaction: null });
+  }
+
   clearHostMuteNotice() {
     if (this.state.hostMuteNotice) this._emit({ hostMuteNotice: null });
+  }
+
+  clearParticipantJoin() {
+    if (this.state.lastParticipantJoin) this._emit({ lastParticipantJoin: null });
   }
 
   destroy() {

@@ -23,6 +23,10 @@ export interface PagesEnv {
   METERED_SECRET_KEY?: string;
   METERED_API_KEY?: string;
   AUTH_SECRET?: string;
+  ADMIN_EMAIL?: string;
+  ADMIN_PASSWORD?: string;
+  ADMIN_NAME?: string;
+  ADMIN_SETUP_KEY?: string;
   [key: string]: unknown;
 }
 
@@ -71,12 +75,26 @@ export function normalizeMeteredDomain(raw: string): string {
 }
 
 export function normalizeRoomCode(raw: string): string {
-  const cleaned = raw
+  let value = String(raw || '').trim();
+  if (value.includes('room=')) {
+    const m = /[?&#]room=([^&#]+)/i.exec(value);
+    if (m && m[1]) {
+      try {
+        value = decodeURIComponent(m[1]);
+      } catch {
+        value = m[1];
+      }
+    }
+  }
+  const cleaned = value
     .trim()
     .toUpperCase()
-    .replace(/[^A-Z0-9-]/g, '')
-    .slice(0, 28);
-  return cleaned || 'SS-SALA-ORBITA1';
+    .replace(/^HTTPS?:\/\/[^/]+\/?/i, '')
+    .replace(/^\/?SALA\//i, '')
+    .replace(/^SS-SALA-/i, '')
+    .replace(/[^A-Z0-9]/g, '')
+    .slice(0, 16);
+  return cleaned || 'ORBIT6';
 }
 
 export type PeerRole = 'host' | 'guest';
@@ -100,7 +118,46 @@ export interface WaitingGuest {
   clientId: string;
   name: string;
   initial: string;
+  micOn?: boolean;
+  camOn?: boolean;
   requestedAt: number;
+}
+
+export interface SuiteProfile {
+  title?: string;
+  description?: string;
+  coverImage?: string;
+  coverVideo?: string;
+  updatedBy?: string;
+  updatedAt?: number;
+}
+
+export interface RoomPollOption {
+  id: string;
+  label: string;
+  votes: string[];
+}
+
+export interface RoomInteractiveState {
+  mood?: 'cosmos' | 'emerald' | 'amber' | 'indigo' | null;
+  suiteProfile?: SuiteProfile | null;
+  card?: {
+    id: string;
+    category: string;
+    prompt: string;
+    byName: string;
+  } | null;
+  poll?: {
+    id: string;
+    question: string;
+    options: RoomPollOption[];
+    byName: string;
+  } | null;
+  timer?: {
+    endsAt: number;
+    label: string;
+    byName: string;
+  } | null;
 }
 
 export interface RoomMeta {
@@ -111,6 +168,8 @@ export interface RoomMeta {
   hostId: string | null;
   startedAt: number;
   spotlightPeerId: string | null;
+  suiteProfile?: SuiteProfile | null;
+  interactive?: RoomInteractiveState;
 }
 
 export interface ChatMessage {
