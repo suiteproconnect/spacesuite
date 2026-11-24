@@ -352,7 +352,8 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
       camOn: false,
     });
     await saveRoomMetaAndLists(context.env, code, state.meta);
-    return jsonResponse({ ok: true, meta: state.meta });
+    const updatedAfterClaim = await getRoomParticipants(context.env, code);
+    return jsonResponse({ ok: true, meta: state.meta, peers: updatedAfterClaim.active });
   }
 
   if (signalType === 'broadcast:state') {
@@ -379,7 +380,8 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
       };
     }
     await saveRoomMetaAndLists(context.env, code, state.meta);
-    return jsonResponse({ ok: true, meta: state.meta });
+    const updatedAfterBroadcast = await getRoomParticipants(context.env, code);
+    return jsonResponse({ ok: true, meta: state.meta, peers: updatedAfterBroadcast.active });
   }
 
   if (signalType === 'emitter:release') {
@@ -392,7 +394,8 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
       }
       await saveRoomMetaAndLists(context.env, code, state.meta);
     }
-    return jsonResponse({ ok: true, meta: state.meta });
+    const updatedAfterRelease = await getRoomParticipants(context.env, code);
+    return jsonResponse({ ok: true, meta: state.meta, peers: updatedAfterRelease.active });
   }
 
   if (signalType === 'chat:send') {

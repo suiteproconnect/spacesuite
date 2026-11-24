@@ -3,12 +3,6 @@ pages_build_output_dir = "."
 compatibility_date = "2025-05-01"
 compatibility_flags = ["nodejs_compat"]
 
-[[d1_databases]]
-binding = "DB"
-database_name = "spacesuite-db"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
-
-[[durable_objects.bindings]]
-name = "ROOM_DO"
-class_name = "RoomDurableObject"
-script_name = "spacesuite-do"
+# Bindings recomendados en Cloudflare Pages -> Settings -> Bindings:
+# 1) D1 database: variable = "DB", database = "spacesuite-db"
+# 2) Durable Object (opcional tras desplegar wrangler.do.toml): variable = "ROOM_DO", class = "RoomDurableObject", script = "spacesuite-do"
