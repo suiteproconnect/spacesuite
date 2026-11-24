@@ -2014,17 +2014,20 @@ body:not(.bars-hidden) #grid .gt.top-row .gb {
 
 .msg {
   max-width: 88%;
+  width: auto;
+  height: auto;
   align-self: flex-start;
-  padding: 9px 13px;
+  padding: 8px 12px;
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 16px;
   background: rgba(15, 23, 34, 0.62);
-  font-size: var(--chat-msg-size, 0.94rem);
+  font-size: var(--chat-msg-size, 0.92rem);
+  line-height: 1.38;
   word-break: break-word;
   color: #f8fafc;
 }
 
-.msg.me {
+.msg.is-me {
   align-self: flex-end;
   background: var(--chat-bubble-bg, rgba(16, 185, 129, 0.24));
   border-color: var(--chat-bubble-border, rgba(52, 211, 153, 0.55));
@@ -2033,8 +2036,17 @@ body:not(.bars-hidden) #grid .gt.top-row .gb {
 .msg small {
   display: block;
   color: rgba(226, 232, 240, 0.72);
-  font-size: 0.7rem;
-  margin-bottom: 2px;
+  font-size: 0.68rem;
+  line-height: 1.2;
+  margin-bottom: 3px;
+}
+
+.msg > span {
+  display: inline;
+  font-size: var(--chat-msg-size, 0.92rem);
+  font-weight: 400;
+  color: #f8fafc;
+  line-height: 1.38;
 }
 
 .chat-link {
@@ -2736,26 +2748,54 @@ body:not(.bars-hidden) #grid .gt.top-row .gb {
   font-weight: 500 !important;
 }
 
-@media (max-width: 460px) {
+@media (max-width: 520px) {
+  .top {
+    gap: 7px;
+    padding-left: calc(8px + var(--sal));
+    padding-right: calc(8px + var(--sar));
+  }
+  .top h1 {
+    font-size: 0.9rem;
+  }
   .top h1 .role {
     display: none;
   }
+  .top p {
+    font-size: 0.68rem;
+    gap: 4px;
+  }
   .tops {
-    gap: 5px;
+    gap: 4px;
+  }
+  .top .btn-superkey {
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    border-radius: 10px;
+    gap: 0;
+  }
+  .top .btn-superkey span {
+    display: none;
+  }
+  .top .btn-superkey svg {
+    width: 17px;
+    height: 17px;
   }
   .tops .orb,
   .tops .orb.pl {
-    width: 34px;
-    height: 34px;
+    width: 32px;
+    height: 32px;
+    border-radius: 10px;
   }
   .tops .orb.pl {
-    min-width: 40px;
-    padding: 0 8px;
+    min-width: 38px;
+    padding: 0 7px;
+    font-size: 0.76rem;
   }
   .top .tlg,
   .tlg-btn .tlg {
-    width: 36px;
-    height: 36px;
+    width: 34px;
+    height: 34px;
   }
   .ctl .orb {
     width: 48px;
@@ -3799,6 +3839,18 @@ video.vf-soft {
   height: 20px;
   flex-shrink: 0;
   filter: drop-shadow(0 0 6px rgba(217, 4, 41, 0.7));
+}
+
+.top .btn-superkey {
+  padding: 5px 10px;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  gap: 6px;
+}
+
+.top .btn-superkey svg {
+  width: 16px;
+  height: 16px;
 }
 
 .btn-superkey.floating {

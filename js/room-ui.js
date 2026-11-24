@@ -1212,7 +1212,7 @@ export class RoomController {
           </p>
         </div>
         <div class="tops">
-          <button type="button" class="btn-superkey" data-dock="superkey" style="padding:5px 10px;font-size:0.72rem;letter-spacing:0.04em" aria-label="SUPER KEY">${iconSuperKey()}<span>SUPER KEY</span></button>
+          <button type="button" class="btn-superkey" data-dock="superkey" aria-label="SUPER KEY">${iconSuperKey()}<span>SUPER KEY</span></button>
           <button type="button" class="orb sm pl" id="tPe" aria-label="Participantes">${iconUsers()}<span id="cnt">${st.peers.length}</span></button>
           <button type="button" class="orb sm" id="tIn" ${isRoomFull ? 'disabled' : ''} aria-label="${isRoomFull ? 'Sala llena' : 'Invitar a la sala'}">${iconInvite()}</button>
           <button type="button" class="orb sm" id="tMenu" aria-label="Suite y controles">${iconMenu()}${

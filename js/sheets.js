@@ -913,7 +913,7 @@ export class ChatHudController {
         this.msgsEl.innerHTML = visibleMessages
           .map((m) => {
             const isSelf = m.fromPeerId === this.selfPeerId;
-            return `<div class="msg ${isSelf ? 'me' : ''}"><small>${
+            return `<div class="msg ${isSelf ? 'is-me' : ''}"><small>${
               isSelf ? 'Tú' : esc(m.fromName)
             } · ${esc(formatMessageTime(m.timestamp))}</small><span>${renderLinkedTextHtml(m.text)}</span></div>`;
           })

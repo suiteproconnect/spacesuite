@@ -2,3 +2,8 @@ name = "space-suite"
 pages_build_output_dir = "."
 compatibility_date = "2025-05-01"
 compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "spacesuite"
+database_id = "dc6bc4bc-70ea-43b4-a1d3-138ab850156b"
