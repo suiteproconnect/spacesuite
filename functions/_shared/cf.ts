@@ -17,11 +17,24 @@ export interface D1Database {
   exec(query: string): Promise<unknown>;
 }
 
+export interface DurableObjectId {
+  toString(): string;
+}
+
+export interface DurableObjectStub {
+  fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+}
+
+export interface DurableObjectNamespace {
+  idFromName(name: string): DurableObjectId;
+  get(id: DurableObjectId): DurableObjectStub;
+}
+
 export interface PagesEnv {
   DB?: D1Database;
-  METERED_DOMAIN?: string;
-  METERED_SECRET_KEY?: string;
-  METERED_API_KEY?: string;
+  ROOM_DO?: DurableObjectNamespace;
+  CLOUDFLARE_CALLS_APP_ID?: string;
+  CLOUDFLARE_CALLS_APP_SECRET?: string;
   AUTH_SECRET?: string;
   ADMIN_EMAIL?: string;
   ADMIN_PASSWORD?: string;
@@ -43,7 +56,7 @@ export const MAX_ROOM_PARTICIPANTS = 20;
 export const CORS_HEADERS: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS',
 };
 
 export function jsonResponse(data: unknown, status = 200): Response {
@@ -65,13 +78,6 @@ export async function parseJsonBody<T extends Record<string, unknown>>(request: 
   } catch {
     return {} as T;
   }
-}
-
-export function normalizeMeteredDomain(raw: string): string {
-  return raw
-    .trim()
-    .replace(/^https?:\/\//i, '')
-    .replace(/\/+$/, '');
 }
 
 export function normalizeRoomCode(raw: string): string {
@@ -99,6 +105,12 @@ export function normalizeRoomCode(raw: string): string {
 
 export type PeerRole = 'host' | 'guest';
 
+export interface PublishedTrackRef {
+  sessionId: string;
+  trackName: string;
+  kind: 'video' | 'audio';
+}
+
 export interface PeerInfo {
   peerId: string;
   clientId: string;
@@ -106,10 +118,14 @@ export interface PeerInfo {
   initial: string;
   role: PeerRole;
   micOn: boolean;
+  micLocked: boolean;
   camOn: boolean;
+  isEmitter: boolean;
   handRaised: boolean;
   screenSharing: boolean;
   speaking: boolean;
+  callsSessionId?: string | null;
+  camTrackName?: string | null;
   joinedAt: number;
 }
 
@@ -160,6 +176,21 @@ export interface RoomInteractiveState {
   } | null;
 }
 
+export type BroadcastStatus = 'idle' | 'preparing' | 'live';
+export type BroadcastSourceType = 'none' | 'screen' | 'media';
+
+export interface RoomBroadcastState {
+  emitterPeerId: string | null;
+  emitterName: string | null;
+  status: BroadcastStatus;
+  sourceType: BroadcastSourceType;
+  mediaTitle?: string | null;
+  callsSessionId?: string | null;
+  videoTrackName?: string | null;
+  audioTrackName?: string | null;
+  updatedAt: number;
+}
+
 export interface RoomMeta {
   code: string;
   pass?: string;
@@ -168,6 +199,8 @@ export interface RoomMeta {
   hostId: string | null;
   startedAt: number;
   spotlightPeerId: string | null;
+  emitterPeerId: string | null;
+  broadcast: RoomBroadcastState;
   suiteProfile?: SuiteProfile | null;
   interactive?: RoomInteractiveState;
 }

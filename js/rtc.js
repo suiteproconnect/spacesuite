@@ -1,14 +1,18 @@
 export const ROOM_CAPACITY = 20;
 
-const BASE_STUN_SERVERS = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'stun:stun2.l.google.com:19302' },
-  { urls: 'stun:stun3.l.google.com:19302' },
-  { urls: 'stun:stun4.l.google.com:19302' },
-  { urls: 'stun:stun.cloudflare.com:3478' },
-  { urls: 'stun:global.stun.twilio.com:3478' },
-];
+export const VIEWER_CAM_CONSTRAINTS = {
+  width: { ideal: 160, max: 160 },
+  height: { ideal: 120, max: 120 },
+  frameRate: { ideal: 12, max: 12 },
+};
+
+export const SCREEN_CONSTRAINTS = {
+  width: { ideal: 1280, max: 1280 },
+  height: { ideal: 720, max: 720 },
+  frameRate: { ideal: 30, max: 30 },
+};
+
+const CF_ICE_SERVERS = [{ urls: 'stun:stun.cloudflare.com:3478' }];
 
 function getPersistentClientId() {
   const key = 'spacesuite_client_id';
@@ -23,24 +27,15 @@ function getPersistentClientId() {
   }
 }
 
-async function waitForMeteredSdk(timeoutMs = 2500) {
-  if (typeof window !== 'undefined' && window.Metered?.Meeting) return true;
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    await new Promise((r) => setTimeout(r, 100));
-    if (typeof window !== 'undefined' && window.Metered?.Meeting) return true;
-  }
-  return false;
-}
-
 export class RoomEngine {
   constructor(onChange) {
     this.onChange = typeof onChange === 'function' ? onChange : () => {};
 
     this.state = {
       status: 'idle',
-      sfuMode: 'p2p-fallback',
-      videoQuality: '720p',
+      sfuMode: 'cloudflare-calls',
+      callsConfigured: false,
+      videoQuality: '120p-12fps',
       roomCapacity: ROOM_CAPACITY,
       rejectionMessage: '',
       self: null,
@@ -50,6 +45,8 @@ export class RoomEngine {
       typingPeers: [],
       meta: null,
       localStream: null,
+      broadcastStream: null,
+      remoteBroadcastStream: null,
       screenStream: null,
       remoteStreams: {},
       speakingIds: {},
@@ -58,62 +55,59 @@ export class RoomEngine {
       mediaNotice: null,
       lastWave: null,
       lastReaction: null,
-      lastParticipantJoin: null,
+      lastSubtitle: null,
       facingMode: 'user',
       hostMuteNotice: null,
+      wsConnected: false,
     };
 
     this.roomCode = '';
-    this.pollTimer = null;
-    this.pollActive = false;
-    this.lastEventId = 0;
     this.peerId = crypto.randomUUID();
     this.clientId = getPersistentClientId();
-    this.connections = new Map();
-    this.dataChannels = new Map();
-    this.iceCandidateQueues = new Map();
-    this.iceRestartTimers = new Map();
-    this.iceRestartCooldowns = new Map();
-    this.runtimeIceServers = [];
-
-    this.meteredSession = null;
-    this.meteredMeeting = null;
-    this.meteredJoined = false;
-    this.meteredJoining = false;
-    this.meteredSessionToPeerId = new Map();
-    this.meteredSessionRecords = new Map();
-    this.meteredRemoteStreams = new Map();
-    this.notifiedMeteredSessionIds = new Set();
-    this.currentQuality = '720p';
-
     this.joinConfig = null;
-    this.reconnectTimer = null;
-    this.reconnectAttempts = 0;
     this.manualLeave = false;
     this.screenBusy = false;
     this.lastTypingSentAt = 0;
 
-    this.audioCtx = null;
-    this.analysers = new Map();
-    this._lastSpeakingState = {};
-    this._holdTimers = {};
-    this._destroyed = false;
+    // WebSocket + fallback polling
+    this.ws = null;
+    this.wsHeartbeat = null;
+    this.reconnectTimer = null;
+    this.reconnectAttempts = 0;
+    this.pollTimer = null;
+    this.pollActive = false;
+    this.pollInFlight = false;
+    this.lastEventId = 0;
+    this._pendingEmitterClaim = null;
 
-    this._speakingInterval = window.setInterval(() => this._tickSpeaking(), 120);
+    // Cloudflare Calls SFU state (1 PeerConnection)
+    this.callsSessionId = null;
+    this.sfuPc = null;
+    this._sfuQueue = Promise.resolve();
+    this._publishedCam = null; // { trackName, mid, trackId, transceiver }
+    this._publishedBroadcast = []; // [{ kind, trackName, mid, trackId, transceiver }]
+    this._subscribedRemote = new Map(); // subKey -> { kind, ownerKey, remoteSessionId, trackName, mid }
+    this._remoteMidOwner = new Map(); // mid -> ownerKey ('__broadcast__' or peerId)
+    this._remoteBroadcastMediaStream = null;
+    this._visibleViewerPeerIds = new Set();
+
+    this._destroyed = false;
     this._typingPruneInterval = window.setInterval(() => this._pruneTyping(), 600);
 
     this._onPageHide = () => {
       const code = this.roomCode;
       if (!code || this.manualLeave) return;
-      const body = JSON.stringify({
-        type: 'room:leave',
-        peerId: this.peerId,
-        clientId: this.clientId,
-      });
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        try {
+          this.ws.send(JSON.stringify({ type: 'room:leave', peerId: this.peerId, clientId: this.clientId }));
+        } catch {
+          // ignore
+        }
+      }
       fetch(`/api/room/${encodeURIComponent(code)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body,
+        body: JSON.stringify({ type: 'room:leave', peerId: this.peerId, clientId: this.clientId }),
         keepalive: true,
       }).catch(() => {});
     };
@@ -135,84 +129,10 @@ export class RoomEngine {
     }
   }
 
-  _tickSpeaking() {
-    if (this._destroyed || this.analysers.size === 0) return;
-    let changed = false;
-    let levelChanged = false;
-
-    for (const [id, entry] of this.analysers.entries()) {
-      entry.analyser.getByteFrequencyData(entry.data);
-      let sum = 0;
-      for (let i = 0; i < entry.data.length; i++) sum += entry.data[i];
-      const avg = sum / entry.data.length;
-      const normalized = Math.min(1, avg / 42);
-
-      if (id === 'local') {
-        const micActive = Boolean(this.state.self?.micOn);
-        const lvl = micActive ? normalized : 0;
-        if (Math.abs(lvl - this.state.localAudioLevel) > 0.02) {
-          this.state.localAudioLevel = lvl;
-          levelChanged = true;
-        }
-      }
-
-      const isSpeakingNow = id === 'local' ? Boolean(this.state.self?.micOn) && avg > 14 : avg > 14;
-      let nextBool = false;
-      if (isSpeakingNow) {
-        this._holdTimers[id] = Date.now() + 550;
-        nextBool = true;
-      } else if ((this._holdTimers[id] || 0) > Date.now()) {
-        nextBool = true;
-      }
-
-      const targetKey = id === 'local' ? this.peerId : id;
-      if (this._lastSpeakingState[targetKey] !== nextBool) {
-        this._lastSpeakingState[targetKey] = nextBool;
-        changed = true;
-        if (id === 'local' && this.roomCode) {
-          this._sendSignal({ type: 'peer:state', patch: { speaking: nextBool } });
-        }
-      }
-    }
-
-    if (changed) {
-      this.state.speakingIds = { ...this.state.speakingIds, ...this._lastSpeakingState };
-      this._emit();
-    } else if (levelChanged) {
-      this._emit();
-    }
-  }
-
-  _applyAdaptiveQuality() {
-    if (this.state.status !== 'connected') return;
-    const targetQuality = this.state.peers.length >= 6 ? '540p' : '720p';
-    if (this.currentQuality === targetQuality) return;
-    this.currentQuality = targetQuality;
-    this._emit({ videoQuality: targetQuality });
-
-    const constraints =
-      targetQuality === '720p'
-        ? { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } }
-        : { width: { ideal: 960 }, height: { ideal: 540 }, frameRate: { ideal: 24 } };
-
-    if (this.meteredMeeting) {
-      this.meteredMeeting.defaultVideoConstraints = { video: { ...constraints } };
-    }
-    const camTrack = this.state.localStream?.getVideoTracks().find((t) => t.readyState === 'live');
-    if (camTrack && typeof camTrack.applyConstraints === 'function') {
-      camTrack.applyConstraints(constraints).catch(() => {});
-    }
-  }
-
   _appendMessageUnique(incoming) {
+    if (!incoming || !incoming.id) return;
     const prev = this.state.messages;
-    const existingIndex = prev.findIndex((m) => m.id === incoming.id);
-    if (existingIndex >= 0) {
-      const updated = [...prev];
-      updated[existingIndex] = { ...updated[existingIndex], ...incoming };
-      this._emit({ messages: updated });
-      return;
-    }
+    if (prev.some((m) => m.id === incoming.id)) return;
     const dup = prev.some(
       (m) =>
         m.fromPeerId === incoming.fromPeerId &&
@@ -221,8 +141,7 @@ export class RoomEngine {
         Math.abs(m.timestamp - incoming.timestamp) < 2500,
     );
     if (dup) return;
-    const nextList = [...prev, incoming].sort((a, b) => a.timestamp - b.timestamp);
-    this._emit({ messages: nextList });
+    this._emit({ messages: [...prev, incoming] });
   }
 
   _registerTypingPeer(peerId, name, isTyping, toPeerId) {
@@ -242,26 +161,592 @@ export class RoomEngine {
     this._emit({ typingPeers: next });
   }
 
+  // Serialized SFU queue so local/remote negotiations never race
+  _enqueueSfu(fn) {
+    const run = this._sfuQueue.then(() => fn()).catch((err) => {
+      console.warn('CF Calls SFU step error:', err);
+    });
+    this._sfuQueue = run;
+    return run;
+  }
+
+  _ensureSfuPc() {
+    if (this.sfuPc) return this.sfuPc;
+    const pc = new RTCPeerConnection({
+      iceServers: CF_ICE_SERVERS,
+      bundlePolicy: 'max-bundle',
+    });
+
+    pc.oniceconnectionstatechange = () => {
+      const st = pc.iceConnectionState;
+      const weak = st === 'disconnected' || st === 'failed';
+      if (weak !== this.state.weakConnection) {
+        this._emit({ weakConnection: weak });
+      }
+      if (st === 'failed') {
+        try {
+          pc.restartIce();
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    pc.ontrack = (ev) => {
+      const track = ev.track;
+      const mid = ev.transceiver?.mid;
+      if (!track || !mid) return;
+      const ownerKey = this._remoteMidOwner.get(mid);
+      if (!ownerKey) return;
+
+      const emitStream = () => {
+        if (this._destroyed) return;
+        if (ownerKey === '__broadcast__') {
+          if (!this._remoteBroadcastMediaStream) {
+            this._remoteBroadcastMediaStream = new MediaStream();
+          }
+          const bs = this._remoteBroadcastMediaStream;
+          if (!bs.getTracks().some((t) => t.id === track.id)) {
+            bs.getTracks()
+              .filter((t) => t.kind === track.kind)
+              .forEach((old) => bs.removeTrack(old));
+            bs.addTrack(track);
+          }
+          this._emit({ remoteBroadcastStream: new MediaStream(bs.getTracks()) });
+        } else {
+          const prev = this.state.remoteStreams[ownerKey] || new MediaStream();
+          if (!prev.getTracks().some((t) => t.id === track.id)) {
+            prev
+              .getTracks()
+              .filter((t) => t.kind === track.kind)
+              .forEach((old) => prev.removeTrack(old));
+            prev.addTrack(track);
+          }
+          this._emit({
+            remoteStreams: {
+              ...this.state.remoteStreams,
+              [ownerKey]: new MediaStream(prev.getTracks()),
+            },
+          });
+        }
+      };
+
+      track.onunmute = emitStream;
+      track.onended = () => {
+        if (ownerKey === '__broadcast__' && this._remoteBroadcastMediaStream) {
+          this._remoteBroadcastMediaStream.removeTrack(track);
+          const rem = this._remoteBroadcastMediaStream.getTracks();
+          this._emit({ remoteBroadcastStream: rem.length > 0 ? new MediaStream(rem) : null });
+        } else if (this.state.remoteStreams[ownerKey]) {
+          const cur = this.state.remoteStreams[ownerKey];
+          cur.removeTrack(track);
+          const next = { ...this.state.remoteStreams };
+          if (cur.getTracks().length > 0) next[ownerKey] = new MediaStream(cur.getTracks());
+          else delete next[ownerKey];
+          this._emit({ remoteStreams: next });
+        }
+      };
+
+      emitStream();
+    };
+
+    this.sfuPc = pc;
+    return pc;
+  }
+
+  async _waitIceGatheringComplete(pc, timeoutMs = 1800) {
+    if (pc.iceGatheringState === 'complete') return;
+    await new Promise((resolve) => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        pc.removeEventListener('icegatheringstatechange', onState);
+        window.clearTimeout(timer);
+        resolve();
+      };
+      const onState = () => {
+        if (pc.iceGatheringState === 'complete') done();
+      };
+      const timer = window.setTimeout(done, timeoutMs);
+      pc.addEventListener('icegatheringstatechange', onState);
+    });
+  }
+
+  async _applyTransceiverBitrate(sender, maxBitrate, maxFramerate, preference = 'maintain-framerate') {
+    if (!sender || sender.track?.kind !== 'video' || typeof sender.getParameters !== 'function') return;
+    try {
+      const params = sender.getParameters();
+      if (!params) return;
+      if (!Array.isArray(params.encodings) || params.encodings.length === 0) {
+        params.encodings = [{}];
+      }
+      params.encodings[0].maxBitrate = maxBitrate;
+      params.encodings[0].maxFramerate = maxFramerate;
+      if ('degradationPreference' in params) {
+        params.degradationPreference = preference;
+      }
+      await sender.setParameters(params);
+    } catch {
+      // ignore unsupported encoder parameter fields
+    }
+  }
+
+  async _closePublishedSfuTracks(entries) {
+    if (!this.callsSessionId || !this.sfuPc || !Array.isArray(entries) || entries.length === 0) return;
+    const toClose = [];
+    for (const item of entries) {
+      const resolvedMid = item?.mid ?? item?.transceiver?.mid;
+      if (resolvedMid) toClose.push({ mid: String(resolvedMid) });
+      if (item?.transceiver) {
+        try {
+          await item.transceiver.sender?.replaceTrack(null);
+          item.transceiver.direction = 'inactive';
+        } catch {
+          // ignore
+        }
+      }
+    }
+    if (toClose.length === 0) return;
+    try {
+      await fetch('/api/calls/tracks', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: this.callsSessionId,
+          tracks: toClose,
+          force: true,
+        }),
+      });
+    } catch {
+      // ignore
+    }
+  }
+
+  async publishLocalCamTrack() {
+    if (!this.callsSessionId || this._destroyed || this.state.status !== 'connected') return;
+    if (this.state.meta?.emitterPeerId === this.peerId) return;
+    const camTrack = this.state.localStream?.getVideoTracks().find((t) => t.readyState === 'live' && t.enabled);
+    if (!camTrack) return;
+
+    return this._enqueueSfu(async () => {
+      if (!this.callsSessionId || this._destroyed) return;
+      if (this.state.meta?.emitterPeerId === this.peerId) return;
+
+      const pc = this._ensureSfuPc();
+      if (this._publishedCam?.transceiver) {
+        const sender = this._publishedCam.transceiver.sender;
+        if (this._publishedCam.trackId === camTrack.id) {
+          await this._applyTransceiverBitrate(sender, 90_000, 12, 'maintain-framerate');
+          return;
+        }
+        await sender.replaceTrack(camTrack);
+        this._publishedCam.trackId = camTrack.id;
+        await this._applyTransceiverBitrate(sender, 90_000, 12, 'maintain-framerate');
+        return;
+      }
+
+      const trackName = `cam-${this.peerId.slice(0, 8)}-${Date.now()}`;
+      const transceiver = pc.addTransceiver(camTrack, {
+        direction: 'sendonly',
+        streams: [this.state.localStream],
+        sendEncodings: [{ maxBitrate: 90_000, maxFramerate: 12 }],
+      });
+      await this._applyTransceiverBitrate(transceiver.sender, 90_000, 12, 'maintain-framerate');
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await this._waitIceGatheringComplete(pc, 1500);
+
+      const res = await fetch('/api/calls/tracks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: this.callsSessionId,
+          sessionDescription: { type: 'offer', sdp: pc.localDescription.sdp },
+          tracks: [{ location: 'local', mid: transceiver.mid, trackName }],
+        }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json.sessionDescription) {
+        transceiver.direction = 'inactive';
+        return;
+      }
+      await pc.setRemoteDescription(json.sessionDescription);
+      this._publishedCam = {
+        trackName,
+        mid: transceiver.mid,
+        trackId: camTrack.id,
+        transceiver,
+      };
+      this._sendSignal({
+        type: 'peer:state',
+        patch: {
+          callsSessionId: this.callsSessionId,
+          camTrackName: trackName,
+        },
+      });
+    });
+  }
+
+  async unpublishLocalCamTrack() {
+    const prev = this._publishedCam;
+    this._publishedCam = null;
+    if (prev) {
+      await this._enqueueSfu(() => this._closePublishedSfuTracks([prev]));
+    }
+    this._sendSignal({
+      type: 'peer:state',
+      patch: { camTrackName: null },
+    });
+  }
+
+  async _publishBroadcastTracks(stream) {
+    if (!this.callsSessionId || !stream || this._destroyed) {
+      return { videoTrackName: null, audioTrackName: null };
+    }
+    return this._enqueueSfu(async () => {
+      if (this._publishedBroadcast.length > 0) {
+        await this._closePublishedSfuTracks(this._publishedBroadcast);
+        this._publishedBroadcast = [];
+      }
+      const pc = this._ensureSfuPc();
+      const pendingEntries = [];
+
+      const vTrack = stream.getVideoTracks().find((t) => t.readyState === 'live');
+      if (vTrack) {
+        if ('contentHint' in vTrack) vTrack.contentHint = 'motion';
+        const vName = `tx-vid-${this.peerId.slice(0, 8)}-${Date.now()}`;
+        const vTr = pc.addTransceiver(vTrack, {
+          direction: 'sendonly',
+          streams: [stream],
+          sendEncodings: [{ maxBitrate: 800_000, maxFramerate: 30 }],
+        });
+        await this._applyTransceiverBitrate(vTr.sender, 800_000, 30, 'maintain-resolution');
+        pendingEntries.push({ kind: 'video', trackName: vName, transceiver: vTr, trackId: vTrack.id });
+      }
+
+      const aTrack = stream.getAudioTracks().find((t) => t.readyState === 'live');
+      if (aTrack) {
+        const aName = `tx-aud-${this.peerId.slice(0, 8)}-${Date.now()}`;
+        const aTr = pc.addTransceiver(aTrack, {
+          direction: 'sendonly',
+          streams: [stream],
+        });
+        pendingEntries.push({ kind: 'audio', trackName: aName, transceiver: aTr, trackId: aTrack.id });
+      }
+
+      if (pendingEntries.length === 0) return { videoTrackName: null, audioTrackName: null };
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await this._waitIceGatheringComplete(pc, 1500);
+
+      // mid is only guaranteed after setLocalDescription(offer)
+      const tracksMeta = pendingEntries
+        .filter((e) => e.transceiver?.mid)
+        .map((e) => ({
+          location: 'local',
+          mid: String(e.transceiver.mid),
+          trackName: e.trackName,
+        }));
+
+      if (tracksMeta.length === 0) return { videoTrackName: null, audioTrackName: null };
+
+      const res = await fetch('/api/calls/tracks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: this.callsSessionId,
+          sessionDescription: { type: 'offer', sdp: pc.localDescription.sdp },
+          tracks: tracksMeta,
+        }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json.sessionDescription) {
+        for (const e of pendingEntries) {
+          try {
+            await e.transceiver.sender?.replaceTrack(null);
+            e.transceiver.direction = 'inactive';
+          } catch {
+            // ignore
+          }
+        }
+        return { videoTrackName: null, audioTrackName: null };
+      }
+      await pc.setRemoteDescription(json.sessionDescription);
+      this._publishedBroadcast = pendingEntries.map((e) => ({
+        ...e,
+        mid: e.transceiver.mid,
+      }));
+      return {
+        videoTrackName: pendingEntries.find((e) => e.kind === 'video')?.trackName || null,
+        audioTrackName: pendingEntries.find((e) => e.kind === 'audio')?.trackName || null,
+      };
+    }).then((res) => res || { videoTrackName: null, audioTrackName: null });
+  }
+
+  /**
+   * Called by RoomController whenever the paginated viewer camera carousel turns pages.
+   * Pauses/unsubscribes off-screen viewer camera tracks from Cloudflare Calls SFU so mobile
+   * devices only decode the 4-6 currently visible cameras + active main broadcast.
+   */
+  setVisibleViewerPeerIds(peerIds) {
+    const next = new Set(Array.isArray(peerIds) ? peerIds : []);
+    let changed = next.size !== this._visibleViewerPeerIds.size;
+    if (!changed) {
+      for (const id of next) {
+        if (!this._visibleViewerPeerIds.has(id)) {
+          changed = true;
+          break;
+        }
+      }
+    }
+    if (!changed) return;
+    this._visibleViewerPeerIds = next;
+    if (this.callsSessionId && this.state.status === 'connected') {
+      this._syncRemoteSubscriptions();
+    }
+  }
+
+  _syncRemoteSubscriptions() {
+    if (!this.callsSessionId || this._destroyed || this.state.status !== 'connected') return;
+
+    return this._enqueueSfu(async () => {
+      if (!this.callsSessionId || this._destroyed || this.state.status !== 'connected') return;
+
+      const desired = new Map(); // subKey -> { kind, ownerKey, remoteSessionId, trackName }
+      const b = this.state.meta?.broadcast;
+      if (b?.status === 'live' && b.emitterPeerId && b.emitterPeerId !== this.peerId && b.callsSessionId) {
+        if (b.videoTrackName) {
+          desired.set(`b-vid:${b.videoTrackName}`, {
+            kind: 'video',
+            ownerKey: '__broadcast__',
+            remoteSessionId: b.callsSessionId,
+            trackName: b.videoTrackName,
+          });
+        }
+        if (b.audioTrackName) {
+          desired.set(`b-aud:${b.audioTrackName}`, {
+            kind: 'audio',
+            ownerKey: '__broadcast__',
+            remoteSessionId: b.callsSessionId,
+            trackName: b.audioTrackName,
+          });
+        }
+      }
+
+      for (const peer of this.state.peers) {
+        if (peer.peerId === this.peerId) continue;
+        if (peer.peerId === b?.emitterPeerId) continue;
+        if (!this._visibleViewerPeerIds.has(peer.peerId)) continue;
+        if (!peer.camOn || !peer.callsSessionId || !peer.camTrackName) continue;
+        desired.set(`cam:${peer.peerId}:${peer.camTrackName}`, {
+          kind: 'video',
+          ownerKey: peer.peerId,
+          remoteSessionId: peer.callsSessionId,
+          trackName: peer.camTrackName,
+        });
+      }
+
+      // Close subscriptions no longer visible or stopped
+      const toClose = [];
+      for (const [subKey, sub] of this._subscribedRemote.entries()) {
+        if (!desired.has(subKey)) {
+          toClose.push({ subKey, sub });
+        }
+      }
+      if (toClose.length > 0) {
+        const pcNow = this.sfuPc;
+        try {
+          await fetch('/api/calls/tracks', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sessionId: this.callsSessionId,
+              tracks: toClose.map((x) => ({ mid: String(x.sub.mid) })),
+              force: true,
+            }),
+          });
+        } catch {
+          // ignore
+        }
+        for (const item of toClose) {
+          if (pcNow) {
+            const tr = pcNow.getTransceivers().find((t) => t.mid === item.sub.mid);
+            if (tr) {
+              try {
+                tr.direction = 'inactive';
+              } catch {
+                // ignore
+              }
+            }
+          }
+          this._subscribedRemote.delete(item.subKey);
+          this._remoteMidOwner.delete(item.sub.mid);
+          if (item.sub.ownerKey === '__broadcast__') {
+            this._remoteBroadcastMediaStream = null;
+            this._emit({ remoteBroadcastStream: null });
+          } else if (this.state.remoteStreams[item.sub.ownerKey]) {
+            const nextStreams = { ...this.state.remoteStreams };
+            delete nextStreams[item.sub.ownerKey];
+            this._emit({ remoteStreams: nextStreams });
+          }
+        }
+      }
+
+      // Open newly visible subscriptions
+      const toOpen = [];
+      for (const [subKey, req] of desired.entries()) {
+        if (!this._subscribedRemote.has(subKey)) {
+          toOpen.push({ subKey, ...req });
+        }
+      }
+      if (toOpen.length === 0) return;
+
+      const pc = this._ensureSfuPc();
+      const res = await fetch('/api/calls/tracks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: this.callsSessionId,
+          tracks: toOpen.map((x) => ({
+            location: 'remote',
+            sessionId: x.remoteSessionId,
+            trackName: x.trackName,
+          })),
+        }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !Array.isArray(json.tracks)) return;
+
+      json.tracks.forEach((respTrack, idx) => {
+        const meta = toOpen[idx];
+        if (!meta || !respTrack?.mid) return;
+        this._remoteMidOwner.set(String(respTrack.mid), meta.ownerKey);
+        this._subscribedRemote.set(meta.subKey, {
+          ...meta,
+          mid: String(respTrack.mid),
+        });
+      });
+
+      if (json.requiresImmediateRenegotiation && json.sessionDescription) {
+        await pc.setRemoteDescription(json.sessionDescription);
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        await fetch('/api/calls/renegotiate', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sessionId: this.callsSessionId,
+            sessionDescription: { type: 'answer', sdp: pc.localDescription.sdp },
+          }),
+        });
+      }
+    });
+  }
+
+  _closeSfuConnection() {
+    if (this.sfuPc) {
+      this.sfuPc.ontrack = null;
+      this.sfuPc.oniceconnectionstatechange = null;
+      try {
+        this.sfuPc.close();
+      } catch {
+        // ignore
+      }
+      this.sfuPc = null;
+    }
+    this._publishedCam = null;
+    this._publishedBroadcast = [];
+    this._subscribedRemote.clear();
+    this._remoteMidOwner.clear();
+    this._remoteBroadcastMediaStream = null;
+    this.callsSessionId = null;
+    this._emit({ remoteStreams: {}, remoteBroadcastStream: null, weakConnection: false });
+  }
+
+  // Strictly NO microphone capture in spaceSUITE group rooms: audio: false always
+  async _acquireLocalMedia(wantCam) {
+    if (!wantCam) {
+      return { stream: null, mic: false, cam: false };
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      this._emit({ mediaNotice: 'Cámara no disponible en este navegador; conectado como espectador.' });
+      return { stream: null, mic: false, cam: false };
+    }
+    const videoCfg = {
+      ...VIEWER_CAM_CONSTRAINTS,
+      facingMode: this.state.facingMode || 'user',
+    };
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: videoCfg });
+      stream.getVideoTracks().forEach((t) => {
+        t.enabled = true;
+      });
+      this._emit({ mediaNotice: null });
+      return { stream, mic: false, cam: true };
+    } catch {
+      this._emit({ mediaNotice: 'Sin permisos de cámara; conectado al chat y escenario en vivo.' });
+      return { stream: null, mic: false, cam: false };
+    }
+  }
+
+  _stopSocket() {
+    if (this.wsHeartbeat) {
+      window.clearInterval(this.wsHeartbeat);
+      this.wsHeartbeat = null;
+    }
+    if (this.ws) {
+      this.ws.onopen = null;
+      this.ws.onmessage = null;
+      this.ws.onclose = null;
+      this.ws.onerror = null;
+      try {
+        this.ws.close();
+      } catch {
+        // ignore
+      }
+      this.ws = null;
+    }
+    this._emit({ wsConnected: false });
+  }
+
+  _stopPolling() {
+    this.pollActive = false;
+    if (this.pollTimer) {
+      window.clearTimeout(this.pollTimer);
+      this.pollTimer = null;
+    }
+  }
+
   _sendSignal(msg) {
     const code = this.roomCode;
-    if (!code) return;
-    const endpoint = `/api/room/${encodeURIComponent(code)}`;
-    const body = JSON.stringify({
+    if (!code) return Promise.resolve(null);
+    const payload = {
       ...msg,
       peerId: this.peerId,
       clientId: this.clientId,
-    });
+    };
 
-    fetch(endpoint, {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try {
+        this.ws.send(JSON.stringify(payload));
+        return Promise.resolve({ ok: true, via: 'ws' });
+      } catch {
+        // fall through to REST fallback
+      }
+    }
+
+    return fetch(`/api/room/${encodeURIComponent(code)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body,
+      body: JSON.stringify(payload),
       keepalive: msg.type === 'room:leave',
     })
       .then(async (res) => {
-        if (!res.ok || this._destroyed) return;
         const json = await res.json().catch(() => null);
-        if (!json) return;
+        if (!res.ok || this._destroyed || !json) return json;
         if (json.type === 'chat:message' && json.message) {
           this._appendMessageUnique(json.message);
         }
@@ -270,1063 +755,253 @@ export class RoomEngine {
         if (json.self) patch.self = json.self;
         if (Array.isArray(json.peers)) patch.peers = json.peers;
         if (Array.isArray(json.waiting)) patch.waiting = json.waiting;
-        if (Object.keys(patch).length > 0) {
-          this._emit(patch);
-          this._applyAdaptiveQuality();
-        }
+        if (Object.keys(patch).length > 0) this._applyRoomStatePatch(patch);
+        return json;
       })
-      .catch(() => {});
+      .catch(() => null);
   }
 
-  _refreshWeakConnection() {
-    if (this.state.sfuMode === 'metered-sfu') return;
-    let weak = false;
-    for (const entry of this.connections.values()) {
-      const st = entry.pc.iceConnectionState;
-      if (st === 'disconnected' || st === 'failed') {
-        weak = true;
-        break;
-      }
-    }
-    if (weak !== this.state.weakConnection) {
-      this._emit({ weakConnection: weak });
-    }
-  }
+  _applyRoomStatePatch(patch) {
+    const prevEmitter = this.state.meta?.emitterPeerId || null;
+    this._emit(patch);
+    const nextEmitter = this.state.meta?.emitterPeerId || null;
 
-  _detachAnalyser(id) {
-    const entry = this.analysers.get(id);
-    if (entry) {
-      try {
-        entry.source.disconnect();
-      } catch {
-        // ignore
-      }
-      this.analysers.delete(id);
+    // Enforce auto camera-off when becoming emitter
+    if (nextEmitter === this.peerId && prevEmitter !== this.peerId) {
+      this._disableLocalCamForEmitter();
+    }
+
+    if (this.callsSessionId && this.state.status === 'connected') {
+      this._syncRemoteSubscriptions();
     }
   }
 
-  _attachAudioAnalyser(id, stream) {
-    if (!stream || stream.getAudioTracks().length === 0) return;
-    this._detachAnalyser(id);
-    try {
-      const AudioCtx = window.AudioContext || window.webkitAudioContext;
-      if (!AudioCtx) return;
-      if (!this.audioCtx) {
-        this.audioCtx = new AudioCtx();
-      }
-      if (this.audioCtx.state === 'suspended') {
-        this.audioCtx.resume().catch(() => {});
-      }
-      const source = this.audioCtx.createMediaStreamSource(stream);
-      const analyser = this.audioCtx.createAnalyser();
-      analyser.fftSize = 256;
-      source.connect(analyser);
-      const data = new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount));
-      this.analysers.set(id, { analyser, source, data });
-    } catch {
-      // ignore AudioContext block
+  _disableLocalCamForEmitter() {
+    if (this.state.localStream) {
+      this.state.localStream.getVideoTracks().forEach((t) => {
+        t.enabled = false;
+        t.stop();
+      });
+      this._emit({ localStream: null });
+    }
+    if (this._publishedCam) {
+      this.unpublishLocalCamTrack().catch(() => {});
+    }
+    if (this.state.self?.camOn) {
+      this._emit({
+        self: { ...this.state.self, camOn: false, isEmitter: true, screenSharing: true },
+        peers: this.state.peers.map((p) =>
+          p.peerId === this.peerId ? { ...p, camOn: false, isEmitter: true, screenSharing: true } : p,
+        ),
+      });
     }
   }
 
-  _closeMeteredMeeting() {
-    if (this.meteredMeeting) {
-      try {
-        this.meteredMeeting.leaveMeeting();
-      } catch {
-        // ignore
-      }
-      this.meteredMeeting = null;
-    }
-    this.meteredJoined = false;
-    this.meteredJoining = false;
-    this.meteredSessionToPeerId.clear();
-    this.meteredSessionRecords.clear();
-    this.meteredRemoteStreams.clear();
-    this.notifiedMeteredSessionIds.clear();
-  }
+  _handleWsPayload(msg) {
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.type === 'pong') return;
 
-  _resolveMeteredPeerId(participant, sessionId, claimedPeerIds = null) {
-    const extId = participant?.externalUserId;
-    if (extId && extId !== this.peerId) {
-      if (sessionId) this.meteredSessionToPeerId.set(sessionId, extId);
-      return extId;
-    }
-    if (sessionId && this.meteredSessionToPeerId.has(sessionId)) {
-      const mapped = this.meteredSessionToPeerId.get(sessionId);
-      if (mapped && mapped !== this.peerId) return mapped;
-    }
-    const remotePeers = this.state.peers.filter((p) => p.peerId !== this.peerId);
-    const pName = String(participant?.name || participant?.participantName || '').trim().toLowerCase();
-    if (pName) {
-      const matched = remotePeers.find(
-        (p) =>
-          p.name.trim().toLowerCase() === pName &&
-          (!claimedPeerIds || !claimedPeerIds.has(p.peerId)),
-      ) || remotePeers.find((p) => p.name.trim().toLowerCase() === pName);
-      if (matched) {
-        if (sessionId) this.meteredSessionToPeerId.set(sessionId, matched.peerId);
-        return matched.peerId;
-      }
-    }
-    return null;
-  }
-
-  _rebuildMeteredRemoteStreams() {
-    if (this.state.sfuMode !== 'metered-sfu') return;
-    const remotePeers = this.state.peers.filter((p) => p.peerId !== this.peerId);
-    const claimedPeerIds = new Set();
-    const nextRemoteStreams = {};
-    const unresolvedRecords = [];
-
-    for (const [sessionId, rec] of this.meteredSessionRecords.entries()) {
-      const resolvedPeerId = this._resolveMeteredPeerId(rec.participant, sessionId, claimedPeerIds);
-      if (resolvedPeerId && resolvedPeerId !== this.peerId && remotePeers.some((p) => p.peerId === resolvedPeerId)) {
-        claimedPeerIds.add(resolvedPeerId);
-        this.meteredRemoteStreams.set(resolvedPeerId, rec.stream);
-        nextRemoteStreams[resolvedPeerId] = new MediaStream(rec.stream.getTracks());
-        if (rec.stream.getAudioTracks().length > 0 && !this.analysers.has(resolvedPeerId)) {
-          this._attachAudioAnalyser(resolvedPeerId, rec.stream);
-        }
-      } else {
-        unresolvedRecords.push({ sessionId, rec });
-      }
-    }
-
-    const unclaimedPeers = remotePeers.filter((p) => !claimedPeerIds.has(p.peerId));
-    if (unresolvedRecords.length > 0 && unclaimedPeers.length > 0) {
-      for (let i = 0; i < Math.min(unresolvedRecords.length, unclaimedPeers.length); i++) {
-        const { sessionId, rec } = unresolvedRecords[i];
-        const targetPeer = unclaimedPeers[i];
-        this.meteredSessionToPeerId.set(sessionId, targetPeer.peerId);
-        this.meteredRemoteStreams.set(targetPeer.peerId, rec.stream);
-        nextRemoteStreams[targetPeer.peerId] = new MediaStream(rec.stream.getTracks());
-        if (rec.stream.getAudioTracks().length > 0 && !this.analysers.has(targetPeer.peerId)) {
-          this._attachAudioAnalyser(targetPeer.peerId, rec.stream);
-        }
-      }
-    }
-
-    this._emit({ remoteStreams: nextRemoteStreams });
-  }
-
-  async _connectMeteredSFU() {
-    const session = this.meteredSession;
-    if (!session?.configured || !session.roomURL || !session.accessToken) return;
-    if (this.meteredJoined || this.meteredJoining) return;
-
-    const sdkReady = await waitForMeteredSdk(2500);
-    if (!sdkReady || !window.Metered?.Meeting) {
-      this._emit({ mediaNotice: 'SDK SFU no disponible; usando enlace directo.' });
+    if (msg.type === 'room:rejected') {
+      this.manualLeave = true;
+      this._stopSocket();
+      this._stopPolling();
+      this._closeSfuConnection();
+      this._emit({
+        rejectionMessage: String(msg.message || 'No pudiste entrar a la sala.'),
+        status: 'rejected',
+      });
       return;
     }
 
-    this.meteredJoining = true;
-    try {
-      const meeting = new window.Metered.Meeting();
-      this.meteredMeeting = meeting;
-
-      const initialQuality = this.state.peers.length >= 6 ? '540p' : '720p';
-      this.currentQuality = initialQuality;
-      this._emit({ videoQuality: initialQuality });
-
-      meeting.defaultVideoConstraints = {
-        video:
-          initialQuality === '720p'
-            ? { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: 30 }
-            : { width: { ideal: 960 }, height: { ideal: 540 }, frameRate: 24 },
-      };
-
-      const syncParticipantDirectory = (list, markNotified = false) => {
-        if (!Array.isArray(list)) return;
-        for (const p of list) {
-          const sid = p?._id || p?.participantSessionId;
-          if (sid && p.externalUserId) {
-            this.meteredSessionToPeerId.set(sid, p.externalUserId);
-          }
-          if (sid && this.meteredSessionRecords.has(sid)) {
-            this.meteredSessionRecords.get(sid).participant = p;
-          }
-          if (markNotified && sid) {
-            this.notifiedMeteredSessionIds.add(sid);
-          }
-        }
-        if (this.meteredSessionRecords.size > 0) {
-          this._rebuildMeteredRemoteStreams();
-        }
-      };
-
-      meeting.on('onlineParticipants', (list) => syncParticipantDirectory(list));
-
-      meeting.on('participantJoined', (p) => {
-        const sessionId = p?._id || p?.participantSessionId || null;
-        if (sessionId && p?.externalUserId) {
-          this.meteredSessionToPeerId.set(sessionId, p.externalUserId);
-        }
-        if (sessionId && this.meteredSessionRecords.has(sessionId)) {
-          this.meteredSessionRecords.get(sessionId).participant = p;
-          this._rebuildMeteredRemoteStreams();
-        }
-        const resolvedPeerId = this._resolveMeteredPeerId(p, sessionId);
-        const isSelfSession = Boolean(
-          (sessionId && meeting.participantSessionId && sessionId === meeting.participantSessionId) ||
-            (resolvedPeerId && resolvedPeerId === this.peerId),
-        );
-        if (isSelfSession) return;
-
-        if (sessionId) {
-          if (this.notifiedMeteredSessionIds.has(sessionId)) return;
-          this.notifiedMeteredSessionIds.add(sessionId);
-        }
-
-        const matchedPeer = resolvedPeerId
-          ? this.state.peers.find((peer) => peer.peerId === resolvedPeerId)
-          : null;
-        const participantName =
-          String(p?.name || p?.participantName || p?.participant?.name || matchedPeer?.name || '').trim() ||
-          'Nuevo participante';
-
-        this._emit({
-          lastParticipantJoin: {
-            id: crypto.randomUUID(),
-            peerId: resolvedPeerId || sessionId || null,
-            name: participantName,
-            ts: Date.now(),
-          },
-        });
-      });
-
-      meeting.on('participantLeft', (p) => {
-        const sessionId = p?._id || p?.participantSessionId || null;
-        const resolvedId = this._resolveMeteredPeerId(p, sessionId);
-        if (sessionId) {
-          this.meteredSessionToPeerId.delete(sessionId);
-          this.meteredSessionRecords.delete(sessionId);
-          this.notifiedMeteredSessionIds.delete(sessionId);
-        }
-        if (resolvedId) {
-          this.meteredRemoteStreams.delete(resolvedId);
-          this._detachAnalyser(resolvedId);
-        }
-        this._rebuildMeteredRemoteStreams();
-      });
-
-      meeting.on('remoteTrackStarted', (ev) => {
-        if (!ev || ev.participantSessionId === meeting.participantSessionId) return;
-        const incomingTracks = [];
-        if (ev.track) incomingTracks.push(ev.track);
-        if (ev.stream && typeof ev.stream.getTracks === 'function') {
-          for (const stTrack of ev.stream.getTracks()) {
-            if (!incomingTracks.some((t) => t.id === stTrack.id)) incomingTracks.push(stTrack);
-          }
-        }
-        if (incomingTracks.length === 0) return;
-
-        const sessionId = ev.participantSessionId || ev.participant?._id || `sess-${crypto.randomUUID()}`;
-        let rec = this.meteredSessionRecords.get(sessionId);
-        if (!rec) {
-          rec = { sessionId, participant: ev.participant || null, stream: new MediaStream() };
-          this.meteredSessionRecords.set(sessionId, rec);
-        } else if (ev.participant) {
-          rec.participant = ev.participant;
-        }
-
-        const triggerRebuild = () => this._rebuildMeteredRemoteStreams();
-        for (const tr of incomingTracks) {
-          if (tr.kind === 'video') {
-            rec.stream.getVideoTracks().forEach((old) => {
-              if (old.id !== tr.id) rec.stream.removeTrack(old);
-            });
-          } else if (tr.kind === 'audio') {
-            rec.stream.getAudioTracks().forEach((old) => {
-              if (old.id !== tr.id) rec.stream.removeTrack(old);
-            });
-          }
-          if (!rec.stream.getTracks().some((t) => t.id === tr.id)) {
-            rec.stream.addTrack(tr);
-          }
-          tr.onunmute = triggerRebuild;
-          tr.onmute = triggerRebuild;
-          tr.onended = () => {
-            rec.stream.removeTrack(tr);
-            triggerRebuild();
-          };
-        }
-
-        triggerRebuild();
-      });
-
-      meeting.on('remoteTrackStopped', (ev) => {
-        const sessionId = ev?.participantSessionId || ev?.participant?._id || null;
-        const rec = sessionId ? this.meteredSessionRecords.get(sessionId) : null;
-        if (!rec) return;
-        if (ev.type === 'video') {
-          rec.stream.getVideoTracks().forEach((t) => rec.stream.removeTrack(t));
-        } else if (ev.type === 'audio') {
-          rec.stream.getAudioTracks().forEach((t) => rec.stream.removeTrack(t));
-        }
-        this._rebuildMeteredRemoteStreams();
-      });
-
-      meeting.on('activeSpeaker', (sp) => {
-        const resolved = this._resolveMeteredPeerId(undefined, sp?.participantSessionId) || sp?.externalUserId;
-        if (!resolved) return;
-        this._emit({ speakingIds: { ...this.state.speakingIds, [resolved]: true } });
-        window.setTimeout(() => {
-          this._emit({ speakingIds: { ...this.state.speakingIds, [resolved]: false } });
-        }, 700);
-      });
-
-      meeting.on('chatMessageReceived', (m) => {
-        if (!m?.text) return;
-        const senderId =
-          m.sender?.externalUserId ||
-          this._resolveMeteredPeerId(undefined, m.sender?._id || m.participantSessionId) ||
-          m.sender?._id ||
-          'remote';
-        if (senderId === this.peerId) return;
-        const senderName =
-          m.sender?.name ||
-          m.participantName ||
-          this.state.peers.find((p) => p.peerId === senderId)?.name ||
-          'Participante';
-        this._appendMessageUnique({
-          id: m._id || crypto.randomUUID(),
-          roomCode: session.roomName || '',
-          fromPeerId: senderId,
-          fromName: senderName,
-          toPeerId: null,
-          text: m.text,
-          timestamp: m.createdAt ? new Date(m.createdAt).getTime() || Date.now() : Date.now(),
-        });
-      });
-
-      meeting.on('chatTyping', (tp) => {
-        const resolvedId = tp?.externalUserId || this._resolveMeteredPeerId(undefined, tp?.participantSessionId);
-        if (!resolvedId || resolvedId === this.peerId) return;
-        const name =
-          tp?.participantName ||
-          tp?.name ||
-          this.state.peers.find((p) => p.peerId === resolvedId)?.name ||
-          'Alguien';
-        this._registerTypingPeer(resolvedId, name, true, null);
-      });
-
-      meeting.on('stateChanged', (stateArg) => {
-        const st = String(stateArg || '').toLowerCase();
-        if (st.includes('lost')) {
-          this._emit({ weakConnection: true });
-        } else if (st.includes('restored') || st.includes('joined')) {
-          this._emit({ weakConnection: false });
-        }
-      });
-
-      meeting.on('meetingEnded', () => {
-        if (!this.manualLeave) {
-          this._emit({ status: 'ended' });
-        }
-      });
-
-      const joinedInfo = await meeting.join({
-        roomURL: session.roomURL,
-        name: this.joinConfig?.name || this.state.self?.name || 'Invitado',
-        accessToken: session.accessToken,
-      });
-
-      syncParticipantDirectory(joinedInfo?.onlineParticipants || [], true);
-      this.meteredJoined = true;
-
-      const camStream = this.state.localStream;
-      if (camStream) {
-        if (camStream.getAudioTracks().length > 0 && typeof meeting.shareCustomAudio === 'function') {
-          try {
-            await meeting.shareCustomAudio(new MediaStream(camStream.getAudioTracks()));
-            if (!this.state.self?.micOn && typeof meeting.muteLocalAudio === 'function') {
-              meeting.muteLocalAudio();
-            }
-          } catch {
-            // fallback to default audio if custom share rejects
-          }
-        }
-        const videoTrack = camStream.getVideoTracks()[0];
-        if (videoTrack) {
-          await videoTrack
-            .applyConstraints(
-              initialQuality === '720p'
-                ? { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } }
-                : { width: { ideal: 960 }, height: { ideal: 540 }, frameRate: { ideal: 24 } },
-            )
-            .catch(() => {});
-          let videoShared = false;
-          if (typeof meeting.shareCustomVideoTrack === 'function') {
-            try {
-              await meeting.shareCustomVideoTrack(videoTrack);
-              videoShared = true;
-            } catch {
-              videoShared = false;
-            }
-          }
-          if (!videoShared && typeof meeting.shareCustomVideoStream === 'function') {
-            try {
-              await meeting.shareCustomVideoStream(new MediaStream([videoTrack]));
-              videoShared = true;
-            } catch {
-              videoShared = false;
-            }
-          }
-          if (!videoShared && typeof meeting.startVideo === 'function') {
-            await meeting.startVideo().catch(() => {});
-          }
-          if (!this.state.self?.camOn && typeof meeting.pauseLocalVideo === 'function') {
-            meeting.pauseLocalVideo();
-          }
-        }
-      }
-    } catch (err) {
-      console.error('Metered SFU connect error:', err);
-      this._emit({ mediaNotice: 'Reconectando transmisión SFU...' });
-    } finally {
-      this.meteredJoining = false;
-    }
-  }
-
-  _getIceServers() {
-    const merged = [...BASE_STUN_SERVERS];
-    const seen = new Set(merged.map((s) => JSON.stringify(s)));
-    const extraLists = [
-      Array.isArray(this.runtimeIceServers) ? this.runtimeIceServers : [],
-      typeof window !== 'undefined' && Array.isArray(window.__SPACESUITE_ICE_SERVERS__)
-        ? window.__SPACESUITE_ICE_SERVERS__
-        : [],
-    ];
-    for (const list of extraLists) {
-      for (const item of list) {
-        if (!item || !item.urls) continue;
-        const urlsStr = Array.isArray(item.urls) ? item.urls.join(',') : String(item.urls);
-        if (/turns?:/i.test(urlsStr) && (!item.username || !item.credential)) {
-          continue;
-        }
-        const normalized = {
-          urls: item.urls,
-          ...(item.username ? { username: String(item.username) } : {}),
-          ...(item.credential ? { credential: String(item.credential) } : {}),
-        };
-        const key = JSON.stringify(normalized);
-        if (!seen.has(key)) {
-          seen.add(key);
-          merged.push(normalized);
-        }
-      }
-    }
-    return merged;
-  }
-
-  _enqueueIceCandidate(remotePeerId, candidate) {
-    if (!remotePeerId || !candidate) return;
-    let queue = this.iceCandidateQueues.get(remotePeerId);
-    if (!queue) {
-      queue = [];
-      this.iceCandidateQueues.set(remotePeerId, queue);
-    }
-    queue.push(candidate);
-  }
-
-  async _flushIceCandidateQueue(remotePeerId) {
-    const entry = this.connections.get(remotePeerId);
-    const queue = this.iceCandidateQueues.get(remotePeerId);
-    if (!entry || !entry.pc.remoteDescription || !queue || queue.length === 0) return;
-    this.iceCandidateQueues.set(remotePeerId, []);
-    for (const candidate of queue) {
-      try {
-        await entry.pc.addIceCandidate(candidate);
-      } catch {
-        // ignore stale ICE candidate
-      }
-    }
-  }
-
-  _clearIceRestartTimer(remotePeerId) {
-    const timer = this.iceRestartTimers.get(remotePeerId);
-    if (timer) {
-      window.clearTimeout(timer);
-      this.iceRestartTimers.delete(remotePeerId);
-    }
-  }
-
-  _scheduleIceRestart(remotePeerId, immediate = false) {
-    if (this._destroyed || this.manualLeave || this.state.status !== 'connected') return;
-    const entry = this.connections.get(remotePeerId);
-    if (!entry) return;
-    if (immediate) {
-      this._clearIceRestartTimer(remotePeerId);
-      this._performIceRestart(remotePeerId);
+    if (msg.type === 'room:waiting') {
+      this._emit({ status: 'waiting' });
       return;
     }
-    if (this.iceRestartTimers.has(remotePeerId)) return;
-    const timer = window.setTimeout(() => {
-      this.iceRestartTimers.delete(remotePeerId);
-      const currentEntry = this.connections.get(remotePeerId);
-      if (!currentEntry) return;
-      const iceSt = currentEntry.pc.iceConnectionState;
-      const connSt = currentEntry.pc.connectionState;
-      if (iceSt === 'disconnected' || iceSt === 'failed' || connSt === 'disconnected' || connSt === 'failed') {
-        this._performIceRestart(remotePeerId);
-      }
-    }, 2200);
-    this.iceRestartTimers.set(remotePeerId, timer);
-  }
 
-  async _performIceRestart(remotePeerId) {
-    if (this._destroyed || this.manualLeave || this.state.status !== 'connected') return;
-    const entry = this.connections.get(remotePeerId);
-    if (!entry || entry.makingOffer) return;
-    const now = Date.now();
-    const lastRestart = this.iceRestartCooldowns.get(remotePeerId) || 0;
-    if (now - lastRestart < 4500) return;
-    this.iceRestartCooldowns.set(remotePeerId, now);
-
-    try {
-      entry.makingOffer = true;
-      if (typeof entry.pc.restartIce === 'function') {
-        entry.pc.restartIce();
-      }
-      const offer = await entry.pc.createOffer({ iceRestart: true });
-      await entry.pc.setLocalDescription(offer);
-      if (entry.pc.localDescription) {
-        this._sendSignal({
-          type: 'webrtc:offer',
-          to: remotePeerId,
-          sdp: entry.pc.localDescription.toJSON(),
-        });
-      }
-    } catch {
-      // ignore ICE restart contention
-    } finally {
-      entry.makingOffer = false;
-    }
-  }
-
-  _closePeerConnection(remotePeerId) {
-    this._clearIceRestartTimer(remotePeerId);
-    this.iceCandidateQueues.delete(remotePeerId);
-    this.iceRestartCooldowns.delete(remotePeerId);
-    const dc = this.dataChannels.get(remotePeerId);
-    if (dc) {
-      try { dc.close(); } catch (_) {}
-      this.dataChannels.delete(remotePeerId);
-    }
-    const entry = this.connections.get(remotePeerId);
-    if (entry) {
-      entry.pc.onicecandidate = null;
-      entry.pc.ontrack = null;
-      entry.pc.onnegotiationneeded = null;
-      entry.pc.oniceconnectionstatechange = null;
-      entry.pc.onconnectionstatechange = null;
-      entry.pc.close();
-      this.connections.delete(remotePeerId);
-    }
-    this._detachAnalyser(remotePeerId);
-    if (this.state.remoteStreams[remotePeerId]) {
-      const next = { ...this.state.remoteStreams };
-      delete next[remotePeerId];
-      this._emit({ remoteStreams: next });
-    }
-    this._refreshWeakConnection();
-  }
-
-  _closeAllConnections() {
-    for (const timer of this.iceRestartTimers.values()) {
-      window.clearTimeout(timer);
-    }
-    this.iceRestartTimers.clear();
-    this.iceCandidateQueues.clear();
-    this.iceRestartCooldowns.clear();
-    for (const pid of Array.from(this.connections.keys())) {
-      this._closePeerConnection(pid);
-    }
-    for (const dc of this.dataChannels.values()) {
-      try { dc.close(); } catch (_) {}
-    }
-    this.dataChannels.clear();
-    this._closeMeteredMeeting();
-    this._emit({ remoteStreams: {}, weakConnection: false });
-  }
-
-  _setupDataChannel(remotePeerId, channel) {
-    if (!channel) return;
-    this.dataChannels.set(remotePeerId, channel);
-    channel.onclose = () => {
-      this.dataChannels.delete(remotePeerId);
-    };
-    channel.onerror = () => {
-      this.dataChannels.delete(remotePeerId);
-    };
-    channel.onmessage = (ev) => {
-      try {
-        const data = JSON.parse(ev.data);
-        if (data.type === 'chat:message' && data.message) {
-          this._appendMessageUnique(data.message);
-        } else if (data.type === 'peer:name_updated' && data.peerId && data.name) {
-          this._emit({
-            peers: this.state.peers.map((p) =>
-              p.peerId === data.peerId
-                ? { ...p, name: data.name, initial: data.initial || data.name[0]?.toUpperCase() || 'S' }
-                : p,
-            ),
-          });
-        } else if (data.type === 'chat:typing') {
-          this._registerTypingPeer(data.peerId, data.name, data.isTyping, data.toPeerId);
-        }
-      } catch {
-        // ignore malformed frame
-      }
-    };
-  }
-
-  _createPeerConnection(remotePeerId, initiateOffer) {
-    const existing = this.connections.get(remotePeerId);
-    if (existing) return existing;
-
-    const pc = new RTCPeerConnection({
-      iceServers: this._getIceServers(),
-      iceCandidatePoolSize: 4,
-      bundlePolicy: 'max-bundle',
-    });
-    const remoteStream = new MediaStream();
-    const entry = {
-      pc,
-      makingOffer: false,
-      ignoreOffer: false,
-      canNegotiate: Boolean(initiateOffer),
-      stream: remoteStream,
-    };
-    this.connections.set(remotePeerId, entry);
-
-    if (initiateOffer) {
-      try {
-        const dc = pc.createDataChannel('spacesuite-chat', { ordered: true });
-        this._setupDataChannel(remotePeerId, dc);
-      } catch {
-        // ignore
-      }
-    }
-    pc.ondatachannel = (ev) => {
-      if (ev.channel) {
-        this._setupDataChannel(remotePeerId, ev.channel);
-      }
-    };
-
-    pc.onicecandidate = ({ candidate }) => {
-      if (candidate) {
-        this._sendSignal({
-          type: 'webrtc:ice',
-          to: remotePeerId,
-          candidate: candidate.toJSON(),
-        });
-      }
-    };
-
-    pc.ontrack = ({ track, streams }) => {
-      const incoming = streams?.[0]?.getTracks?.() || [];
-      const toAttach = incoming.length > 0 ? incoming : [track];
-      for (const tr of toAttach) {
-        if (!tr) continue;
-        if (tr.kind === 'video') {
-          entry.stream.getVideoTracks().forEach((old) => {
-            if (old.id !== tr.id) entry.stream.removeTrack(old);
-          });
-        }
-        if (!entry.stream.getTracks().some((t) => t.id === tr.id)) {
-          entry.stream.addTrack(tr);
-        }
-      }
-      if (track.kind === 'audio') {
-        this._attachAudioAnalyser(remotePeerId, entry.stream);
-      }
-      const emitUpdatedStream = () => {
-        this._emit({
-          remoteStreams: {
-            ...this.state.remoteStreams,
-            [remotePeerId]: new MediaStream(entry.stream.getTracks()),
-          },
-        });
-      };
-      track.onended = () => {
-        entry.stream.removeTrack(track);
-        emitUpdatedStream();
-      };
-      track.onunmute = emitUpdatedStream;
-      track.onmute = emitUpdatedStream;
-      emitUpdatedStream();
-    };
-
-    const handleIceTransition = () => {
-      const iceSt = pc.iceConnectionState;
-      const connSt = pc.connectionState;
-      if (iceSt === 'connected' || iceSt === 'completed' || connSt === 'connected') {
-        this._clearIceRestartTimer(remotePeerId);
-      } else if (iceSt === 'failed' || connSt === 'failed') {
-        this._scheduleIceRestart(remotePeerId, true);
-      } else if (iceSt === 'disconnected' || connSt === 'disconnected') {
-        this._scheduleIceRestart(remotePeerId, false);
-      }
-      this._refreshWeakConnection();
-    };
-
-    pc.oniceconnectionstatechange = handleIceTransition;
-    pc.onconnectionstatechange = handleIceTransition;
-
-    pc.onnegotiationneeded = async () => {
-      if (!entry.canNegotiate || entry.makingOffer || pc.signalingState !== 'stable') return;
-      try {
-        entry.makingOffer = true;
-        await pc.setLocalDescription();
-        if (pc.localDescription) {
-          this._sendSignal({
-            type: 'webrtc:offer',
-            to: remotePeerId,
-            sdp: pc.localDescription.toJSON(),
-          });
-        }
-      } catch {
-        // ignore
-      } finally {
-        entry.makingOffer = false;
-      }
-    };
-
-    const camStream = this.state.localStream;
-    const scrStream = this.state.screenStream;
-
-    if (camStream) {
-      for (const audioTrack of camStream.getAudioTracks()) {
-        pc.addTrack(audioTrack, camStream);
-      }
-    }
-
-    const activeVideoTrack =
-      scrStream?.getVideoTracks()[0] || camStream?.getVideoTracks()[0] || null;
-    if (activeVideoTrack) {
-      const ownerStream = scrStream?.getVideoTracks()[0] ? scrStream : camStream;
-      pc.addTrack(activeVideoTrack, ownerStream);
-    }
-
-    if (initiateOffer && !camStream && !scrStream) {
-      pc.addTransceiver('audio', { direction: 'recvonly' });
-      pc.addTransceiver('video', { direction: 'recvonly' });
-    }
-
-    return entry;
-  }
-
-  async _acquireLocalMedia(wantMic, wantCam, facingMode = 'user') {
-    if (!navigator.mediaDevices?.getUserMedia) {
-      return { stream: null, mic: false, cam: false };
-    }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-        video: {
-          facingMode: { ideal: facingMode === 'environment' ? 'environment' : 'user' },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-        },
+    if (msg.type === 'room:joined' && msg.self) {
+      const wasWaiting = this.state.status === 'waiting';
+      this.reconnectAttempts = 0;
+      const incomingPeers = Array.isArray(msg.peers) ? msg.peers : [msg.self];
+      this._applyRoomStatePatch({
+        self: msg.self,
+        peers: incomingPeers,
+        waiting: Array.isArray(msg.waiting) ? msg.waiting : [],
+        messages: Array.isArray(msg.messages) ? msg.messages : [],
+        meta: msg.meta || null,
+        status: 'connected',
       });
-      stream.getAudioTracks().forEach((t) => {
-        t.enabled = wantMic;
+      if (this.callsSessionId && (msg.self.camOn || wasWaiting)) {
+        this.publishLocalCamTrack().catch(() => {});
+      }
+      return;
+    }
+
+    if (msg.type === 'room:state') {
+      const incomingPeers = Array.isArray(msg.peers) ? msg.peers : this.state.peers;
+      const updatedSelf = incomingPeers.find((p) => p.peerId === this.peerId) || this.state.self;
+      const incomingIds = new Set(incomingPeers.map((p) => p.peerId));
+      const nextTyping = this.state.typingPeers.filter((tp) => incomingIds.has(tp.peerId));
+      this._applyRoomStatePatch({
+        peers: incomingPeers,
+        self: updatedSelf,
+        meta: msg.meta || this.state.meta,
+        typingPeers: nextTyping,
       });
-      stream.getVideoTracks().forEach((t) => {
-        t.enabled = wantCam;
-      });
-      this._emit({ mediaNotice: null });
-      return { stream, mic: wantMic, cam: wantCam };
-    } catch {
-      try {
-        const audioOnly = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-          video: false,
-        });
-        audioOnly.getAudioTracks().forEach((t) => {
-          t.enabled = wantMic;
-        });
-        return { stream: audioOnly, mic: wantMic, cam: false };
-      } catch {
-        return { stream: null, mic: false, cam: false };
-      }
-    }
-  }
-
-  _stopRoomPolling() {
-    this.pollActive = false;
-    if (this.pollTimer) {
-      window.clearTimeout(this.pollTimer);
-      this.pollTimer = null;
-    }
-  }
-
-  async _handleRoomEvents(events) {
-    for (const ev of events) {
-      if (ev.eventType === 'room:rejected') {
-        this.manualLeave = true;
-        this._stopRoomPolling();
-        this._closeAllConnections();
-        this._emit({
-          rejectionMessage: String(ev.payload?.message || 'La sala fue cerrada.'),
-          status: 'rejected',
-        });
-        return;
-      }
-
-      if (ev.eventType === 'peer:name_updated' && ev.payload?.peerId && ev.payload?.name) {
-        const { peerId: pid, name, initial } = ev.payload;
-        this._emit({
-          peers: this.state.peers.map((p) =>
-            p.peerId === pid ? { ...p, name, initial: initial || name[0]?.toUpperCase() || 'S' } : p,
-          ),
-        });
-        continue;
-      }
-
-      if (ev.eventType === 'chat:message' && ev.payload?.message) {
-        this._appendMessageUnique(ev.payload.message);
-        continue;
-      }
-
-      if (ev.eventType === 'chat:typing') {
-        this._registerTypingPeer(
-          String(ev.payload?.peerId || ''),
-          String(ev.payload?.name || 'Participante'),
-          Boolean(ev.payload?.isTyping),
-          ev.payload?.toPeerId || null,
-        );
-        continue;
-      }
-
-      if (ev.eventType === 'wave:received' && ev.payload?.wave) {
-        this._emit({ lastWave: ev.payload.wave });
-        continue;
-      }
-
-      if (ev.eventType === 'reaction:received' && ev.payload?.reaction) {
-        this._emit({ lastReaction: ev.payload.reaction });
-        continue;
-      }
-
-      if (ev.eventType === 'subtitle:received' && ev.payload?.subtitle) {
-        this._emit({ lastSubtitle: ev.payload.subtitle });
-        continue;
-      }
-
-      if (ev.eventType === 'host:mute') {
-        if (this.state.localStream) {
-          this.state.localStream.getAudioTracks().forEach((t) => {
-            t.enabled = false;
-          });
-        }
-        if (this.meteredMeeting && this.meteredJoined && typeof this.meteredMeeting.muteLocalAudio === 'function') {
-          this.meteredMeeting.muteLocalAudio();
-        }
-        this._emit({
-          self: this.state.self ? { ...this.state.self, micOn: false } : null,
-          peers: this.state.peers.map((p) => (p.peerId === this.peerId ? { ...p, micOn: false } : p)),
-          hostMuteNotice: `${String(ev.payload?.byName || 'En la Suite')} silenció tu micrófono.`,
-        });
-        continue;
-      }
-
-      if (this.state.sfuMode === 'metered-sfu') continue;
-
-      if (ev.eventType === 'webrtc:offer') {
-        const from = String(ev.payload?.from || '');
-        const sdp = ev.payload?.sdp;
-        if (!from || !sdp) continue;
-        const entry = this._createPeerConnection(from, false);
-        const polite = this.peerId > from;
-        const offerCollision = entry.makingOffer || entry.pc.signalingState !== 'stable';
-        entry.ignoreOffer = !polite && offerCollision;
-        if (entry.ignoreOffer) continue;
-        try {
-          entry.canNegotiate = true;
-          await entry.pc.setRemoteDescription(sdp);
-          await this._flushIceCandidateQueue(from);
-          await entry.pc.setLocalDescription();
-          if (entry.pc.localDescription) {
-            this._sendSignal({
-              type: 'webrtc:answer',
-              to: from,
-              sdp: entry.pc.localDescription.toJSON(),
-            });
-          }
-        } catch {
-          // ignore
-        }
-        continue;
-      }
-
-      if (ev.eventType === 'webrtc:answer') {
-        const from = String(ev.payload?.from || '');
-        const sdp = ev.payload?.sdp;
-        const entry = this.connections.get(from);
-        if (!entry || !sdp) continue;
-        try {
-          entry.canNegotiate = true;
-          await entry.pc.setRemoteDescription(sdp);
-          await this._flushIceCandidateQueue(from);
-        } catch {
-          // ignore
-        }
-        continue;
-      }
-
-      if (ev.eventType === 'webrtc:ice') {
-        const from = String(ev.payload?.from || '');
-        const candidate = ev.payload?.candidate;
-        if (!from || !candidate) continue;
-        this._enqueueIceCandidate(from, candidate);
-        await this._flushIceCandidateQueue(from);
-      }
-    }
-  }
-
-  _reconcilePeers(incomingPeers) {
-    const incomingIds = new Set(incomingPeers.map((p) => p.peerId));
-    for (const old of this.state.peers) {
-      if (!incomingIds.has(old.peerId)) {
-        this._closePeerConnection(old.peerId);
-      }
+      return;
     }
 
-    const incomingById = new Map(incomingPeers.map((p) => [p.peerId, p]));
-    const orderedExisting = this.state.peers
-      .filter((p) => incomingById.has(p.peerId))
-      .map((p) => incomingById.get(p.peerId));
-    const existingIds = new Set(orderedExisting.map((p) => p.peerId));
-    const added = incomingPeers.filter((p) => !existingIds.has(p.peerId));
-    const nextPeers = [...orderedExisting, ...added];
-
-    const nextTyping = this.state.typingPeers.filter((tp) => incomingIds.has(tp.peerId));
-    this._emit({ peers: nextPeers, typingPeers: nextTyping });
-    this._applyAdaptiveQuality();
-
-    if (this.state.status === 'connected' && this.state.sfuMode === 'metered-sfu') {
-      if (this.meteredSessionRecords.size > 0) {
-        this._rebuildMeteredRemoteStreams();
-      }
-    } else if (this.state.status === 'connected') {
-      for (const remote of incomingPeers) {
-        if (remote.peerId === this.peerId) continue;
-        if (!this.connections.has(remote.peerId)) {
-          this._createPeerConnection(remote.peerId, this.peerId < remote.peerId);
-        }
-      }
+    if (msg.type === 'room:waiting_list') {
+      this._emit({ waiting: Array.isArray(msg.waiting) ? msg.waiting : [] });
+      return;
     }
-  }
 
-  async _startMediaTransportOnAdmit(peersToConnect = []) {
-    if (this._destroyed || this.manualLeave || this.state.status !== 'connected') return;
-    try {
-      const res = await fetch('/api/metered/session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          roomCode: this.roomCode,
-          peerId: this.peerId,
-          name: this.joinConfig?.name || this.state.self?.name || 'Invitado',
-          isAdmin: Boolean(this.joinConfig?.wantHost),
-        }),
-      });
-      const sessionJson = await res.json().catch(() => null);
-      if (sessionJson && Array.isArray(sessionJson.iceServers)) {
-        this.runtimeIceServers = sessionJson.iceServers;
+    if (msg.type === 'chat:message' && msg.message) {
+      this._appendMessageUnique(msg.message);
+      return;
+    }
+
+    if (msg.type === 'chat:typing') {
+      this._registerTypingPeer(
+        String(msg.peerId || ''),
+        String(msg.name || 'Participante'),
+        Boolean(msg.isTyping),
+        msg.toPeerId || null,
+      );
+      return;
+    }
+
+    if (msg.type === 'wave:received' && msg.wave) {
+      this._emit({ lastWave: msg.wave });
+      return;
+    }
+
+    if (msg.type === 'reaction:received' && msg.reaction) {
+      this._emit({ lastReaction: msg.reaction });
+      return;
+    }
+
+    if (msg.type === 'subtitle:received' && msg.subtitle) {
+      this._emit({ lastSubtitle: msg.subtitle });
+      return;
+    }
+
+    if (msg.type === 'emitter:granted') {
+      if (msg.meta) this._applyRoomStatePatch({ meta: msg.meta });
+      if (this._pendingEmitterClaim) {
+        const resolve = this._pendingEmitterClaim.resolve;
+        window.clearTimeout(this._pendingEmitterClaim.timer);
+        this._pendingEmitterClaim = null;
+        resolve({ ok: true, meta: msg.meta });
       }
-      if (!res.ok || !sessionJson || sessionJson.ok === false) {
-        this.meteredSession = null;
-        this._emit({ sfuMode: 'p2p-fallback' });
+      return;
+    }
+
+    if (msg.type === 'emitter:denied') {
+      if (this._pendingEmitterClaim) {
+        const resolve = this._pendingEmitterClaim.resolve;
+        window.clearTimeout(this._pendingEmitterClaim.timer);
+        this._pendingEmitterClaim = null;
+        resolve({ ok: false, error: msg.message || 'Otro participante está emitiendo.' });
       } else {
-        this.meteredSession = sessionJson;
-        this._emit({
-          roomCapacity: sessionJson.maxParticipants || ROOM_CAPACITY,
-          sfuMode: sessionJson.configured ? 'metered-sfu' : 'p2p-fallback',
-        });
+        this._emit({ mediaNotice: msg.message || 'Otro participante está emitiendo.' });
       }
-    } catch {
-      this.meteredSession = null;
-      this._emit({ sfuMode: 'p2p-fallback' });
+      return;
     }
 
-    if (this._destroyed || this.manualLeave || this.state.status !== 'connected') return;
-
-    if (this.state.sfuMode === 'metered-sfu') {
-      this._connectMeteredSFU();
-    } else {
-      const list = Array.isArray(peersToConnect) && peersToConnect.length > 0 ? peersToConnect : this.state.peers;
-      for (const remote of list) {
-        if (remote.peerId === this.peerId) continue;
-        if (!this.connections.has(remote.peerId)) {
-          this._createPeerConnection(remote.peerId, this.peerId < remote.peerId);
-        }
-      }
+    if (msg.type === 'emitter:assigned') {
+      this._emit({
+        mediaNotice: `${String(msg.byName || 'El anfitrión')} te cedió el escenario de emisión.`,
+      });
     }
   }
 
-  _schedulePoll(code) {
-    if (!this.pollActive || this.manualLeave || this._destroyed) return;
-    if (this.pollTimer) window.clearTimeout(this.pollTimer);
-    const intervalMs =
-      this.state.status === 'waiting' || this.state.sfuMode === 'p2p-fallback' ? 850 : 1600;
+  _connectWebSocket(joinPayload) {
+    this._stopSocket();
+    this._stopPolling();
+    const code = joinPayload.roomCode;
+    this.roomCode = code;
 
-    this.pollTimer = window.setTimeout(async () => {
-      if (!this.pollActive || this.manualLeave || this.roomCode !== code || this._destroyed) return;
-      try {
-        const url = `/api/room/${encodeURIComponent(code)}?poll=1&peerId=${encodeURIComponent(this.peerId)}&afterEventId=${this.lastEventId}`;
-        const res = await fetch(url);
-        if (res.ok) {
-          const data = await res.json();
-          if (typeof data.lastEventId === 'number' && data.lastEventId > this.lastEventId) {
-            this.lastEventId = data.lastEventId;
+    const proto = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = typeof window !== 'undefined' ? window.location.host : '127.0.0.1:3000';
+    const wsUrl = `${proto}//${host}/api/room/${encodeURIComponent(code)}/ws`;
+
+    let opened = false;
+    try {
+      const ws = new WebSocket(wsUrl);
+      this.ws = ws;
+
+      ws.onopen = () => {
+        if (this._destroyed || this.manualLeave || this.ws !== ws) return;
+        opened = true;
+        this.reconnectAttempts = 0;
+        this._emit({ wsConnected: true });
+
+        ws.send(
+          JSON.stringify({
+            type: 'room:join',
+            roomCode: code,
+            pass: joinPayload.pass,
+            peerId: this.peerId,
+            clientId: this.clientId,
+            name: joinPayload.name,
+            micOn: false,
+            camOn: Boolean(joinPayload.camOn),
+            wantHost: Boolean(joinPayload.wantHost),
+            callsSessionId: this.callsSessionId,
+          }),
+        );
+
+        this.wsHeartbeat = window.setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            try {
+              ws.send(JSON.stringify({ type: 'ping' }));
+            } catch {
+              // ignore
+            }
           }
-          if (data.ended || data.rejected) {
-            this.manualLeave = true;
-            this._stopRoomPolling();
-            this._closeAllConnections();
-            this._emit({
-              rejectionMessage: data.rejection?.message || 'La sala fue cerrada.',
-              status: 'rejected',
+        }, 15000);
+      };
+
+      ws.onmessage = (evt) => {
+        if (this._destroyed) return;
+        try {
+          const parsed = JSON.parse(String(evt.data || ''));
+          this._handleWsPayload(parsed);
+        } catch {
+          // ignore malformed frames
+        }
+      };
+
+      ws.onclose = () => {
+        if (this.ws !== ws) return;
+        this._stopSocket();
+        if (this.manualLeave || this._destroyed) return;
+        if (!opened) {
+          this._fallbackJoinViaRest(joinPayload);
+          return;
+        }
+        const attempt = Math.min(5, this.reconnectAttempts + 1);
+        this.reconnectAttempts = attempt;
+        const delay = Math.min(7000, 500 * 2 ** (attempt - 1));
+        this.reconnectTimer = window.setTimeout(() => {
+          if (!this.manualLeave && !this._destroyed && this.joinConfig) {
+            this._connectWebSocket({
+              ...this.joinConfig,
+              camOn: this.state.self?.camOn ?? this.joinConfig.camOn,
             });
-            return;
           }
-          if (Array.isArray(data.events) && data.events.length > 0) {
-            await this._handleRoomEvents(data.events);
-            if (this.manualLeave) return;
-          }
-          if (data.inRoom) {
-            const justAdmitted = data.status === 'connected' && this.state.status === 'waiting';
-            const patch = {};
-            if (justAdmitted) patch.status = 'connected';
-            if (data.self) patch.self = data.self;
-            if (data.meta) patch.meta = data.meta;
-            if (Array.isArray(data.waiting)) patch.waiting = data.waiting;
-            if (Object.keys(patch).length > 0) this._emit(patch);
-            if (Array.isArray(data.messages)) {
-              for (const m of data.messages) this._appendMessageUnique(m);
-            }
-            if (justAdmitted) {
-              await this._startMediaTransportOnAdmit(Array.isArray(data.peers) ? data.peers : []);
-            }
-            if (Array.isArray(data.peers)) this._reconcilePeers(data.peers);
-          }
-        }
-      } catch {
-        // retry next tick
-      }
-      this._schedulePoll(code);
-    }, intervalMs);
+        }, delay);
+      };
+
+      ws.onerror = () => {
+        // onclose handles fallback/reconnect cleanly
+      };
+    } catch {
+      this._fallbackJoinViaRest(joinPayload);
+    }
   }
 
-  async _connectRoomChannel(joinPayload) {
-    this._stopRoomPolling();
-    this.roomCode = joinPayload.roomCode;
-    this.lastEventId = 0;
-
+  async _fallbackJoinViaRest(joinPayload) {
     try {
       const res = await fetch(`/api/room/${encodeURIComponent(joinPayload.roomCode)}`, {
         method: 'POST',
@@ -1338,117 +1013,132 @@ export class RoomEngine {
           peerId: this.peerId,
           clientId: this.clientId,
           name: joinPayload.name,
-          micOn: joinPayload.micOn,
-          camOn: joinPayload.camOn,
-          wantHost: joinPayload.wantHost,
-          suiteProfile: joinPayload.suiteProfile || undefined,
+          micOn: false,
+          camOn: Boolean(joinPayload.camOn),
+          wantHost: Boolean(joinPayload.wantHost),
+          callsSessionId: this.callsSessionId,
         }),
       });
       const msg = await res.json();
       if (typeof msg.lastEventId === 'number') this.lastEventId = msg.lastEventId;
-
-      if (msg.type === 'room:waiting') {
-        this._emit({
-          status: 'waiting',
-          ...(msg.meta ? { meta: msg.meta } : {}),
-        });
+      this._handleWsPayload(msg);
+      if (!this.manualLeave && (msg.type === 'room:joined' || msg.type === 'room:waiting')) {
         this.pollActive = true;
-        this._schedulePoll(joinPayload.roomCode);
-        return;
-      }
-      if (msg.type === 'room:rejected') {
-        this.manualLeave = true;
-        this._stopRoomPolling();
-        this._closeAllConnections();
-        this._emit({
-          rejectionMessage: msg.message || 'No fue posible entrar a la sala.',
-          status: 'rejected',
-        });
-        return;
-      }
-      if (msg.type === 'room:joined' && msg.self) {
-        this.reconnectAttempts = 0;
-        const initialPeers = Array.isArray(msg.peers) ? msg.peers : [msg.self];
-        this._emit({
-          self: msg.self,
-          peers: initialPeers,
-          waiting: Array.isArray(msg.waiting) ? msg.waiting : [],
-          messages: Array.isArray(msg.messages) ? msg.messages : [],
-          meta: msg.meta || null,
-          status: 'connected',
-        });
-        this._applyAdaptiveQuality();
-
-        await this._startMediaTransportOnAdmit(initialPeers);
-
-        this.pollActive = true;
-        this._schedulePoll(joinPayload.roomCode);
+        this._scheduleFallbackPoll(joinPayload.roomCode);
       }
     } catch {
-      if (!this.manualLeave) {
-        const attempt = Math.min(5, this.reconnectAttempts + 1);
-        this.reconnectAttempts = attempt;
-        const delay = Math.min(8000, 700 * 2 ** (attempt - 1));
-        this.reconnectTimer = window.setTimeout(() => {
-          if (!this.manualLeave && this.joinConfig) {
-            this._connectRoomChannel(this.joinConfig);
-          }
-        }, delay);
-      }
+      // retry next tick
     }
+  }
+
+  _scheduleFallbackPoll(code) {
+    if (!this.pollActive || this.manualLeave || this._destroyed) return;
+    if (this.pollTimer) window.clearTimeout(this.pollTimer);
+    this.pollTimer = window.setTimeout(async () => {
+      if (this.pollActive && !this.pollInFlight && !this.manualLeave) {
+        this.pollInFlight = true;
+        try {
+          const res = await fetch(
+            `/api/room/${encodeURIComponent(code)}?poll=1&peerId=${encodeURIComponent(this.peerId)}&afterEventId=${this.lastEventId}`,
+          );
+          if (res.ok) {
+            const data = await res.json();
+            if (typeof data.lastEventId === 'number' && data.lastEventId > this.lastEventId) {
+              this.lastEventId = data.lastEventId;
+            }
+            if (data.ended || data.rejected) {
+              this._handleWsPayload({
+                type: 'room:rejected',
+                message: data.rejection?.message || 'La sala fue cerrada.',
+              });
+              return;
+            }
+            if (Array.isArray(data.events)) {
+              for (const ev of data.events) {
+                this._handleWsPayload({ type: ev.eventType, ...ev.payload });
+              }
+            }
+            if (data.inRoom) {
+              this._applyRoomStatePatch({
+                status: data.status || 'connected',
+                self: data.self || this.state.self,
+                meta: data.meta || this.state.meta,
+                waiting: Array.isArray(data.waiting) ? data.waiting : [],
+                peers: Array.isArray(data.peers) ? data.peers : this.state.peers,
+              });
+              if (Array.isArray(data.messages)) {
+                for (const m of data.messages) this._appendMessageUnique(m);
+              }
+            }
+          }
+        } catch {
+          // ignore
+        } finally {
+          this.pollInFlight = false;
+        }
+      }
+      this._scheduleFallbackPoll(code);
+    }, 1500);
   }
 
   async joinRoom(opts) {
     this.manualLeave = false;
     this._emit({ rejectionMessage: '', mediaNotice: null, status: 'joining' });
 
-    if (!opts.camOn && opts.requireMedia) {
-      this._emit({ mediaNotice: 'Enciende tu cámara para unirte a la sala', status: 'idle' });
-      return false;
-    }
-
     let media;
     const pre = opts.precheckedStream;
-    const requestedFacing = opts.facingMode === 'environment' ? 'environment' : 'user';
-    if (pre && pre.getTracks().some((t) => t.readyState === 'live')) {
-      pre.getAudioTracks().forEach((t) => {
-        t.enabled = opts.micOn;
-      });
-      pre.getVideoTracks().forEach((t) => {
-        t.enabled = Boolean(opts.camOn);
-      });
-      const hasLivePreCam = pre.getVideoTracks().some((t) => t.readyState === 'live' && t.enabled);
-      media = { stream: pre, mic: opts.micOn, cam: Boolean(opts.camOn && hasLivePreCam) };
+    const hasLiveCam = Boolean(pre && pre.getVideoTracks().some((t) => t.readyState === 'live'));
+    if (hasLiveCam && opts.camOn) {
+      // Drop any audio track if prechecked stream ever had one — mics strictly locked
+      pre.getAudioTracks().forEach((t) => t.stop());
+      const vTrack = pre.getVideoTracks()[0];
+      vTrack.enabled = true;
+      media = { stream: new MediaStream([vTrack]), mic: false, cam: true };
     } else {
-      media = await this._acquireLocalMedia(opts.micOn, opts.camOn, requestedFacing);
+      if (pre) pre.getTracks().forEach((t) => t.stop());
+      media = await this._acquireLocalMedia(Boolean(opts.camOn));
     }
 
-    const hasVideo = Boolean(
-      media.stream?.getVideoTracks().some((t) => t.readyState === 'live' && t.enabled),
-    );
-    if (opts.requireMedia && !hasVideo) {
-      if (media.stream && media.stream !== opts.precheckedStream) {
-        media.stream.getTracks().forEach((t) => t.stop());
+    // Create Cloudflare Calls SFU Session
+    try {
+      const res = await fetch('/api/calls/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ roomCode: opts.roomCode, peerId: this.peerId }),
+      });
+      const sessionJson = await res.json();
+      if (res.status === 403) {
+        if (media.stream) media.stream.getTracks().forEach((t) => t.stop());
+        this._emit({
+          rejectionMessage: sessionJson.error || 'La sala alcanzó su capacidad máxima (20 usuarios).',
+          status: 'rejected',
+        });
+        return false;
       }
-      this._emit({ mediaNotice: 'Enciende tu cámara para unirte a la sala', status: 'idle' });
-      return false;
+      if (res.ok && sessionJson.ok) {
+        this.callsSessionId = sessionJson.sessionId || null;
+        this._emit({
+          roomCapacity: sessionJson.maxParticipants || ROOM_CAPACITY,
+          callsConfigured: Boolean(sessionJson.configured && sessionJson.sessionId),
+          sfuMode: sessionJson.configured && sessionJson.sessionId ? 'cloudflare-calls' : 'ws-local-preview',
+        });
+      }
+    } catch {
+      this.callsSessionId = null;
+      this._emit({ callsConfigured: false, sfuMode: 'ws-local-preview' });
     }
 
-    this._emit({ localStream: media.stream, facingMode: requestedFacing });
-    if (media.stream) {
-      this._attachAudioAnalyser('local', media.stream);
-    }
+    this._emit({ localStream: media.stream });
 
     this.joinConfig = {
       roomCode: opts.roomCode,
       pass: opts.pass,
       name: opts.name,
-      micOn: media.mic,
+      micOn: false,
       camOn: media.cam,
-      wantHost: opts.wantHost,
-      suiteProfile: opts.suiteProfile || null,
+      wantHost: Boolean(opts.wantHost),
     };
-    await this._connectRoomChannel(this.joinConfig);
+    this._connectWebSocket(this.joinConfig);
     return true;
   }
 
@@ -1458,19 +1148,27 @@ export class RoomEngine {
       window.clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    this._stopRoomPolling();
+    if (this.state.meta?.emitterPeerId === this.peerId) {
+      this._sendSignal({ type: 'emitter:release' });
+    }
     this._sendSignal({ type: 'room:leave' });
+    this._stopSocket();
+    this._stopPolling();
     this.roomCode = '';
-    this._closeAllConnections();
-    this._detachAnalyser('local');
+    this._closeSfuConnection();
     if (this.state.localStream) {
       this.state.localStream.getTracks().forEach((t) => t.stop());
+    }
+    if (this.state.broadcastStream) {
+      this.state.broadcastStream.getTracks().forEach((t) => t.stop());
     }
     if (this.state.screenStream) {
       this.state.screenStream.getTracks().forEach((t) => t.stop());
     }
     this._emit({
       localStream: null,
+      broadcastStream: null,
+      remoteBroadcastStream: null,
       screenStream: null,
       peers: [],
       waiting: [],
@@ -1480,262 +1178,262 @@ export class RoomEngine {
     });
   }
 
-  async _replaceVideoTrackOnPeers(newTrack, ownerStream, isScreen = false) {
-    if (this.state.sfuMode === 'metered-sfu' && this.meteredMeeting && this.meteredJoined) {
-      if (newTrack && typeof this.meteredMeeting.shareCustomVideoTrack === 'function') {
-        try {
-          await this.meteredMeeting.shareCustomVideoTrack(newTrack);
-        } catch {
-          // ignore
-        }
-      }
-      return;
-    }
-
-    for (const [remotePeerId, entry] of this.connections.entries()) {
-      const videoTransceiver = entry.pc
-        .getTransceivers()
-        .find((tr) => tr.sender.track?.kind === 'video' || tr.receiver.track?.kind === 'video');
-      if (videoTransceiver) {
-        const wasPassive =
-          videoTransceiver.direction === 'recvonly' || videoTransceiver.direction === 'inactive';
-        if (newTrack && wasPassive) {
-          videoTransceiver.direction = 'sendrecv';
-        }
-        await videoTransceiver.sender.replaceTrack(newTrack);
-        if (isScreen && newTrack) {
-          try {
-            const params = videoTransceiver.sender.getParameters();
-            if (params && 'degradationPreference' in params) {
-              params.degradationPreference = 'maintain-resolution';
-              await videoTransceiver.sender.setParameters(params);
-            }
-          } catch {
-            // ignore
-          }
-        }
-        if (wasPassive && newTrack && entry.pc.signalingState === 'stable' && !entry.makingOffer) {
-          try {
-            entry.makingOffer = true;
-            await entry.pc.setLocalDescription();
-            if (entry.pc.localDescription) {
-              this._sendSignal({
-                type: 'webrtc:offer',
-                to: remotePeerId,
-                sdp: entry.pc.localDescription.toJSON(),
-              });
-            }
-          } catch {
-            // ignore
-          } finally {
-            entry.makingOffer = false;
-          }
-        }
-      } else if (newTrack && ownerStream) {
-        entry.pc.addTrack(newTrack, ownerStream);
-        if (entry.pc.signalingState === 'stable' && !entry.makingOffer) {
-          try {
-            entry.makingOffer = true;
-            await entry.pc.setLocalDescription();
-            if (entry.pc.localDescription) {
-              this._sendSignal({
-                type: 'webrtc:offer',
-                to: remotePeerId,
-                sdp: entry.pc.localDescription.toJSON(),
-              });
-            }
-          } catch {
-            // ignore
-          } finally {
-            entry.makingOffer = false;
-          }
-        }
-      }
-    }
-  }
-
-  async toggleMic() {
-    const current = this.state.self;
-    if (!current) return;
-    const nextMic = !current.micOn;
-
-    if (nextMic && (!this.state.localStream || this.state.localStream.getAudioTracks().length === 0)) {
-      const media = await this._acquireLocalMedia(true, current.camOn);
-      if (!media.stream) return;
-      this._emit({ localStream: media.stream });
-      this._attachAudioAnalyser('local', media.stream);
-      if (this.state.sfuMode === 'metered-sfu' && this.meteredMeeting && this.meteredJoined) {
-        if (typeof this.meteredMeeting.shareCustomAudio === 'function') {
-          await this.meteredMeeting.shareCustomAudio(media.stream).catch(() => {});
-        }
-      } else {
-        for (const entry of this.connections.values()) {
-          for (const track of media.stream.getTracks()) {
-            const existing = entry.pc.getSenders().find((s) => s.track?.kind === track.kind);
-            if (existing) await existing.replaceTrack(track);
-            else entry.pc.addTrack(track, media.stream);
-          }
-        }
-      }
-    } else if (this.state.localStream) {
-      this.state.localStream.getAudioTracks().forEach((t) => {
-        t.enabled = nextMic;
-      });
-      if (this.state.sfuMode === 'metered-sfu' && this.meteredMeeting && this.meteredJoined) {
-        if (nextMic && typeof this.meteredMeeting.unmuteLocalAudio === 'function') {
-          this.meteredMeeting.unmuteLocalAudio();
-        } else if (!nextMic && typeof this.meteredMeeting.muteLocalAudio === 'function') {
-          this.meteredMeeting.muteLocalAudio();
-        }
-      }
-    }
-
+  toggleMic() {
     this._emit({
-      self: { ...current, micOn: nextMic },
-      peers: this.state.peers.map((p) => (p.peerId === this.peerId ? { ...p, micOn: nextMic } : p)),
+      mediaNotice: 'Micrófonos bloqueados · Solo suena el video o pantalla emitida.',
     });
-    this._sendSignal({ type: 'peer:state', patch: { micOn: nextMic } });
   }
 
   async toggleCam() {
     const current = this.state.self;
     if (!current) return;
-    const nextCam = !current.camOn;
-
-    if (nextCam && (!this.state.localStream || this.state.localStream.getVideoTracks().length === 0)) {
-      try {
-        const target = this.currentQuality === '720p' ? { w: 1280, h: 720 } : { w: 960, h: 540 };
-        const camOnly = await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: target.w }, height: { ideal: target.h }, facingMode: this.state.facingMode || 'user' },
-        });
-        const newTrack = camOnly.getVideoTracks()[0];
-        let nextStream;
-        if (!this.state.localStream) {
-          nextStream = camOnly;
-        } else {
-          this.state.localStream.addTrack(newTrack);
-          nextStream = new MediaStream(this.state.localStream.getTracks());
-        }
-        this._emit({ localStream: nextStream, mediaNotice: null });
-        if (!this.state.screenStream) {
-          await this._replaceVideoTrackOnPeers(newTrack, nextStream, false);
-        }
-      } catch {
-        this._emit({ mediaNotice: 'No se pudo activar la cámara en este dispositivo.' });
-        return;
-      }
-    } else if (this.state.localStream) {
-      this.state.localStream.getVideoTracks().forEach((t) => {
-        t.enabled = nextCam;
+    if (this.state.meta?.emitterPeerId === this.peerId) {
+      this._emit({
+        mediaNotice: 'Tu cámara permanece apagada mientras emites para priorizar el ancho de banda.',
       });
-      if (this.state.sfuMode === 'metered-sfu' && this.meteredMeeting && this.meteredJoined) {
-        if (nextCam && typeof this.meteredMeeting.resumeLocalVideo === 'function') {
-          this.meteredMeeting.resumeLocalVideo();
-        } else if (!nextCam && typeof this.meteredMeeting.pauseLocalVideo === 'function') {
-          this.meteredMeeting.pauseLocalVideo();
+      return;
+    }
+
+    const nextCam = !current.camOn;
+    if (nextCam) {
+      let track = this.state.localStream?.getVideoTracks().find((t) => t.readyState === 'live') || null;
+      if (!track) {
+        const media = await this._acquireLocalMedia(true);
+        if (!media.stream) return;
+        this._emit({ localStream: media.stream, mediaNotice: null });
+      } else {
+        track.enabled = true;
+      }
+      this._emit({
+        self: { ...current, camOn: true },
+        peers: this.state.peers.map((p) => (p.peerId === this.peerId ? { ...p, camOn: true } : p)),
+      });
+      this._sendSignal({ type: 'peer:state', patch: { camOn: true } });
+      if (this.callsSessionId) {
+        await this.publishLocalCamTrack();
+      }
+    } else {
+      if (this.state.localStream) {
+        this.state.localStream.getVideoTracks().forEach((t) => {
+          t.enabled = false;
+          t.stop();
+        });
+      }
+      this._emit({
+        localStream: null,
+        self: { ...current, camOn: false },
+        peers: this.state.peers.map((p) => (p.peerId === this.peerId ? { ...p, camOn: false } : p)),
+      });
+      this._sendSignal({ type: 'peer:state', patch: { camOn: false } });
+      if (this._publishedCam) {
+        await this.unpublishLocalCamTrack();
+      }
+    }
+  }
+
+  claimEmitter(sourceType = 'screen', mediaTitle = null) {
+    const currentEmitter = this.state.meta?.emitterPeerId;
+    if (currentEmitter && currentEmitter !== this.peerId) {
+      return Promise.resolve({
+        ok: false,
+        error: 'Otro participante ya está emitiendo en la sala.',
+      });
+    }
+
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      return new Promise((resolve) => {
+        if (this._pendingEmitterClaim) {
+          window.clearTimeout(this._pendingEmitterClaim.timer);
+          this._pendingEmitterClaim.resolve({ ok: false, error: 'Solicitud reemplazada.' });
+        }
+        const timer = window.setTimeout(() => {
+          this._pendingEmitterClaim = null;
+          resolve({ ok: true });
+        }, 1200);
+        this._pendingEmitterClaim = { resolve, timer };
+        this.ws.send(
+          JSON.stringify({
+            type: 'emitter:claim',
+            peerId: this.peerId,
+            clientId: this.clientId,
+            sourceType,
+            status: 'preparing',
+            mediaTitle,
+            callsSessionId: this.callsSessionId,
+          }),
+        );
+      });
+    }
+
+    return this._sendSignal({
+      type: 'emitter:claim',
+      sourceType,
+      status: 'preparing',
+      mediaTitle,
+      callsSessionId: this.callsSessionId,
+    }).then((res) => (res && res.ok === false ? { ok: false, error: res.error } : { ok: true }));
+  }
+
+  async _waitFirstVideoFrame(stream) {
+    const track = stream?.getVideoTracks()[0];
+    if (!track) return;
+    await new Promise((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        resolve();
+      };
+      const tmp = document.createElement('video');
+      tmp.muted = true;
+      tmp.playsInline = true;
+      tmp.srcObject = new MediaStream([track]);
+      tmp.onloadeddata = finish;
+      tmp.play().catch(() => {});
+      window.setTimeout(finish, 900);
+    });
+  }
+
+  async startScreenBroadcast() {
+    if (this.screenBusy) return false;
+    this.screenBusy = true;
+    try {
+      if (!navigator.mediaDevices?.getDisplayMedia) {
+        this._emit({ mediaNotice: 'Tu navegador no soporta compartir pantalla.' });
+        return false;
+      }
+
+      // 1. Claim lock FIRST in "preparing" state (remote screens stay dark with LED standby)
+      const claim = await this.claimEmitter('screen', 'Pantalla compartida');
+      if (!claim.ok) {
+        this._emit({ mediaNotice: claim.error || 'El escenario de emisión está ocupado.' });
+        return false;
+      }
+
+      let displayStream;
+      try {
+        displayStream = await navigator.mediaDevices.getDisplayMedia({
+          video: SCREEN_CONSTRAINTS,
+          audio: true,
+        });
+      } catch (err) {
+        const errName = err instanceof DOMException ? err.name : '';
+        if (errName === 'OverconstrainedError') {
+          try {
+            displayStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+          } catch {
+            displayStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false }).catch(() => null);
+          }
+        } else {
+          displayStream = null;
         }
       }
+
+      if (!displayStream) {
+        await this.stopBroadcast();
+        return false;
+      }
+
+      const vTrack = displayStream.getVideoTracks()[0];
+      if (!vTrack) {
+        displayStream.getTracks().forEach((t) => t.stop());
+        await this.stopBroadcast();
+        return false;
+      }
+      if ('contentHint' in vTrack) vTrack.contentHint = 'motion';
+      vTrack.onended = () => {
+        this.stopBroadcast().catch(() => {});
+      };
+
+      // 2. Keep remote black until first live frame from source is ready (privacy safeguard)
+      await this._waitFirstVideoFrame(displayStream);
+      if (this.state.meta?.emitterPeerId !== this.peerId) {
+        displayStream.getTracks().forEach((t) => t.stop());
+        return false;
+      }
+
+      this._emit({
+        screenStream: displayStream,
+        broadcastStream: displayStream,
+      });
+
+      const published = await this._publishBroadcastTracks(displayStream);
+      this._sendSignal({
+        type: 'broadcast:state',
+        status: 'live',
+        sourceType: 'screen',
+        mediaTitle: 'Pantalla compartida',
+        callsSessionId: this.callsSessionId,
+        videoTrackName: published.videoTrackName,
+        audioTrackName: published.audioTrackName,
+      });
+      return true;
+    } finally {
+      this.screenBusy = false;
+    }
+  }
+
+  async startMediaBroadcast(stream, title = 'Multimedia local') {
+    if (!stream) return false;
+    const claim = await this.claimEmitter('media', title);
+    if (!claim.ok) {
+      this._emit({ mediaNotice: claim.error || 'El escenario de emisión está ocupado.' });
+      return false;
+    }
+
+    if (this.state.screenStream && this.state.screenStream !== stream) {
+      this.state.screenStream.getTracks().forEach((t) => {
+        t.onended = null;
+        t.stop();
+      });
     }
 
     this._emit({
-      self: { ...current, camOn: nextCam },
-      peers: this.state.peers.map((p) => (p.peerId === this.peerId ? { ...p, camOn: nextCam } : p)),
+      screenStream: null,
+      broadcastStream: stream,
     });
-    this._sendSignal({ type: 'peer:state', patch: { camOn: nextCam } });
+
+    const published = await this._publishBroadcastTracks(stream);
+    this._sendSignal({
+      type: 'broadcast:state',
+      status: 'live',
+      sourceType: 'media',
+      mediaTitle: title,
+      callsSessionId: this.callsSessionId,
+      videoTrackName: published.videoTrackName,
+      audioTrackName: published.audioTrackName,
+    });
+    return true;
   }
 
-  async stopScreenShare() {
+  updateBroadcastTitle(title) {
+    if (this.state.meta?.emitterPeerId !== this.peerId) return;
+    this._sendSignal({
+      type: 'broadcast:state',
+      status: this.state.meta?.broadcast?.status || 'live',
+      sourceType: 'media',
+      mediaTitle: title,
+    });
+  }
+
+  async stopBroadcast() {
+    if (this._publishedBroadcast.length > 0) {
+      const entries = [...this._publishedBroadcast];
+      this._publishedBroadcast = [];
+      await this._enqueueSfu(() => this._closePublishedSfuTracks(entries));
+    }
     if (this.state.screenStream) {
       this.state.screenStream.getTracks().forEach((t) => {
         t.onended = null;
         t.stop();
       });
     }
-    this._emit({ screenStream: null });
-
-    let camTrack = this.state.localStream?.getVideoTracks().find((t) => t.readyState === 'live') || null;
-    if (!camTrack && this.state.self?.camOn && navigator.mediaDevices?.getUserMedia) {
-      try {
-        const target = this.currentQuality === '720p' ? { w: 1280, h: 720 } : { w: 960, h: 540 };
-        const camOnly = await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: target.w }, height: { ideal: target.h }, facingMode: this.state.facingMode || 'user' },
-        });
-        camTrack = camOnly.getVideoTracks()[0] || null;
-        if (camTrack) {
-          if (!this.state.localStream) {
-            this._emit({ localStream: camOnly });
-          } else {
-            this.state.localStream.getVideoTracks().forEach((old) => {
-              this.state.localStream.removeTrack(old);
-            });
-            this.state.localStream.addTrack(camTrack);
-            this._emit({ localStream: new MediaStream(this.state.localStream.getTracks()) });
-          }
-        }
-      } catch {
-        // ignore
-      }
-    }
-    if (camTrack) {
-      camTrack.enabled = Boolean(this.state.self?.camOn);
-    }
-
-    await this._replaceVideoTrackOnPeers(camTrack, this.state.localStream, false);
     this._emit({
-      self: this.state.self ? { ...this.state.self, screenSharing: false } : null,
-      peers: this.state.peers.map((p) =>
-        p.peerId === this.peerId ? { ...p, screenSharing: false } : p,
-      ),
+      screenStream: null,
+      broadcastStream: null,
     });
-    this._sendSignal({ type: 'peer:state', patch: { screenSharing: false } });
-  }
-
-  async toggleScreenShare() {
-    if (this.screenBusy) return;
-    this.screenBusy = true;
-    try {
-      if (this.state.screenStream) {
-        await this.stopScreenShare();
-        return;
-      }
-      if (!navigator.mediaDevices?.getDisplayMedia) {
-        this._emit({ mediaNotice: 'Tu navegador no permite compartir pantalla.' });
-        return;
-      }
-      let displayStream;
-      try {
-        displayStream = await navigator.mediaDevices.getDisplayMedia({
-          video: { frameRate: { ideal: 30 }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-          audio: false,
-        });
-      } catch (err) {
-        const errName = err instanceof DOMException ? err.name : '';
-        if (errName === 'OverconstrainedError') {
-          displayStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
-        } else {
-          if (errName === 'NotSupportedError') {
-            this._emit({ mediaNotice: 'Este navegador no soporta compartir pantalla.' });
-          }
-          return;
-        }
-      }
-      const screenTrack = displayStream.getVideoTracks()[0];
-      if (!screenTrack) return;
-      if ('contentHint' in screenTrack) screenTrack.contentHint = 'detail';
-      screenTrack.onended = () => {
-        this.stopScreenShare().catch(() => {});
-      };
-      this._emit({ screenStream: displayStream });
-      await this._replaceVideoTrackOnPeers(screenTrack, displayStream, true);
-      this._emit({
-        self: this.state.self ? { ...this.state.self, screenSharing: true } : null,
-        peers: this.state.peers.map((p) =>
-          p.peerId === this.peerId ? { ...p, screenSharing: true } : p,
-        ),
-      });
-      this._sendSignal({ type: 'peer:state', patch: { screenSharing: true } });
-    } finally {
-      this.screenBusy = false;
+    if (this.state.meta?.emitterPeerId === this.peerId || this.state.self?.role === 'host') {
+      this._sendSignal({ type: 'emitter:release' });
     }
   }
 
@@ -1745,116 +1443,15 @@ export class RoomEngine {
     const nextHand = !current.handRaised;
     this._emit({
       self: { ...current, handRaised: nextHand },
-      peers: this.state.peers.map((p) =>
-        p.peerId === this.peerId ? { ...p, handRaised: nextHand } : p,
-      ),
+      peers: this.state.peers.map((p) => (p.peerId === this.peerId ? { ...p, handRaised: nextHand } : p)),
     });
     this._sendSignal({ type: 'peer:state', patch: { handRaised: nextHand } });
-  }
-
-  updateMyName(newName) {
-    const cleanName = String(newName || '').trim().slice(0, 32);
-    if (!cleanName || cleanName.length < 2) return;
-    const initial = cleanName[0].toUpperCase();
-    const current = this.state.self;
-    if (!current) return;
-
-    const updatedSelf = { ...current, name: cleanName, initial };
-    this._emit({
-      self: updatedSelf,
-      peers: this.state.peers.map((p) => (p.peerId === this.peerId ? { ...p, name: cleanName, initial } : p)),
-    });
-
-    const payload = JSON.stringify({
-      type: 'peer:name_updated',
-      peerId: this.peerId,
-      name: cleanName,
-      initial,
-    });
-    for (const dc of this.dataChannels.values()) {
-      if (dc.readyState === 'open') {
-        try { dc.send(payload); } catch (_) {}
-      }
-    }
-
-    if (
-      this.state.sfuMode === 'metered-sfu' &&
-      this.meteredMeeting &&
-      this.meteredJoined &&
-      typeof this.meteredMeeting.setParticipantName === 'function'
-    ) {
-      try { this.meteredMeeting.setParticipantName(cleanName); } catch (_) {}
-    }
-
-    this._sendSignal({
-      type: 'peer:state',
-      patch: { name: cleanName },
-    });
   }
 
   sendChat(text, toPeerId = null) {
     const cleanText = String(text || '').trim().slice(0, 500);
     if (!cleanText) return;
-    const msgId = crypto.randomUUID();
-    const now = Date.now();
-    const myName = this.state.self?.name || 'Tú';
-    const myPeerId = this.peerId;
-
-    const localMsg = {
-      id: msgId,
-      roomCode: this.roomCode,
-      fromPeerId: myPeerId,
-      fromName: myName,
-      toPeerId: toPeerId || null,
-      text: cleanText,
-      timestamp: now,
-      status: 'Enviado',
-    };
-
-    // 1. Add immediately to sender's local history (instant UX!)
-    this._appendMessageUnique(localMsg);
-
-    // 2. Broadcast via RTCDataChannels
-    const wirePayload = JSON.stringify({
-      type: 'chat:message',
-      message: localMsg,
-    });
-    if (toPeerId) {
-      const dc = this.dataChannels.get(toPeerId);
-      if (dc && dc.readyState === 'open') {
-        try { dc.send(wirePayload); } catch (_) {}
-      }
-    } else {
-      for (const dc of this.dataChannels.values()) {
-        if (dc.readyState === 'open') {
-          try { dc.send(wirePayload); } catch (_) {}
-        }
-      }
-    }
-
-    // 3. Send via Metered SFU if active
-    if (
-      !toPeerId &&
-      this.state.sfuMode === 'metered-sfu' &&
-      this.meteredMeeting &&
-      this.meteredJoined &&
-      typeof this.meteredMeeting.sendChatMessage === 'function'
-    ) {
-      try {
-        this.meteredMeeting.sendChatMessage(cleanText);
-      } catch {
-        // ignore
-      }
-    }
-
-    // 4. Room API fallback
-    this._sendSignal({
-      type: 'chat:send',
-      text: cleanText,
-      toPeerId,
-      messageId: msgId,
-      timestamp: now,
-    });
+    this._sendSignal({ type: 'chat:send', text: cleanText, toPeerId });
     this._sendSignal({ type: 'chat:typing', isTyping: false, toPeerId });
   }
 
@@ -1863,20 +1460,6 @@ export class RoomEngine {
     if (isTyping && now - this.lastTypingSentAt < 1400) return;
     if (isTyping) this.lastTypingSentAt = now;
     this._sendSignal({ type: 'chat:typing', isTyping, toPeerId });
-    if (
-      isTyping &&
-      !toPeerId &&
-      this.state.sfuMode === 'metered-sfu' &&
-      this.meteredMeeting &&
-      this.meteredJoined &&
-      typeof this.meteredMeeting.sendTypingIndicator === 'function'
-    ) {
-      try {
-        this.meteredMeeting.sendTypingIndicator();
-      } catch {
-        // ignore
-      }
-    }
   }
 
   sendWave(toPeerId = null) {
@@ -1895,41 +1478,24 @@ export class RoomEngine {
     this._sendSignal({ type: 'room:interactive', action, payload });
   }
 
-  updateSuiteProfile(profile) {
-    this._sendSignal({
-      type: 'room:interactive',
-      action: 'suite:profile',
-      payload: profile || {},
-    });
-  }
-
   async flipCamera() {
-    if (!navigator.mediaDevices?.getUserMedia) {
-      this._emit({ mediaNotice: 'Tu navegador no permite cambiar de cámara.' });
+    if (this.state.meta?.emitterPeerId === this.peerId) {
+      this._emit({ mediaNotice: 'Cámara desactivada durante emisión.' });
       return false;
     }
+    if (!navigator.mediaDevices?.getUserMedia) return false;
     const prevFacing = this.state.facingMode === 'environment' ? 'environment' : 'user';
     const nextFacing = prevFacing === 'user' ? 'environment' : 'user';
-    const target = this.currentQuality === '720p' ? { w: 1280, h: 720 } : { w: 960, h: 540 };
-
     let nextCamStream;
     try {
       nextCamStream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: target.w },
-          height: { ideal: target.h },
-          facingMode: { exact: nextFacing },
-        },
+        video: { ...VIEWER_CAM_CONSTRAINTS, facingMode: { exact: nextFacing } },
         audio: false,
       });
     } catch {
       try {
         nextCamStream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            width: { ideal: target.w },
-            height: { ideal: target.h },
-            facingMode: { ideal: nextFacing },
-          },
+          video: { ...VIEWER_CAM_CONSTRAINTS, facingMode: { ideal: nextFacing } },
           audio: false,
         });
       } catch {
@@ -1937,33 +1503,17 @@ export class RoomEngine {
         return false;
       }
     }
-
     const newTrack = nextCamStream.getVideoTracks()[0];
-    if (!newTrack) {
-      nextCamStream.getTracks().forEach((t) => t.stop());
-      this._emit({ mediaNotice: 'No fue posible cambiar de cámara.' });
-      return false;
+    if (!newTrack) return false;
+    if (this.state.localStream) {
+      this.state.localStream.getVideoTracks().forEach((t) => t.stop());
     }
-
-    const prevStream = this.state.localStream;
     const wantCam = Boolean(this.state.self?.camOn ?? true);
     newTrack.enabled = wantCam;
-
-    let mergedStream;
-    if (prevStream) {
-      prevStream.getVideoTracks().forEach((old) => {
-        prevStream.removeTrack(old);
-        old.stop();
-      });
-      prevStream.addTrack(newTrack);
-      mergedStream = new MediaStream(prevStream.getTracks());
-    } else {
-      mergedStream = nextCamStream;
-    }
-
-    this._emit({ localStream: mergedStream, facingMode: nextFacing, mediaNotice: null });
-    if (!this.state.screenStream) {
-      await this._replaceVideoTrackOnPeers(newTrack, mergedStream, false);
+    const merged = new MediaStream([newTrack]);
+    this._emit({ localStream: merged, facingMode: nextFacing, mediaNotice: null });
+    if (this.callsSessionId && wantCam) {
+      await this.publishLocalCamTrack();
     }
     return true;
   }
@@ -1979,57 +1529,40 @@ export class RoomEngine {
   }
 
   async retryMedia() {
-    const current = this.state.self;
-    const wantMic = current ? current.micOn : true;
-    const wantCam = current ? current.camOn : true;
-    const media = await this._acquireLocalMedia(wantMic, wantCam);
+    if (this.state.meta?.emitterPeerId === this.peerId) return;
+    const media = await this._acquireLocalMedia(true);
     if (!media.stream) return;
     if (this.state.localStream) {
       this.state.localStream.getTracks().forEach((t) => t.stop());
     }
     this._emit({ localStream: media.stream, facingMode: 'user' });
-    this._attachAudioAnalyser('local', media.stream);
-
-    if (this.state.sfuMode === 'metered-sfu' && this.meteredMeeting && this.meteredJoined) {
-      if (typeof this.meteredMeeting.shareCustomAudio === 'function') {
-        await this.meteredMeeting.shareCustomAudio(media.stream).catch(() => {});
-      }
-      const vTrack = media.stream.getVideoTracks()[0];
-      if (vTrack && typeof this.meteredMeeting.shareCustomVideoTrack === 'function') {
-        await this.meteredMeeting.shareCustomVideoTrack(vTrack).catch(() => {});
-      }
-    } else {
-      for (const entry of this.connections.values()) {
-        for (const track of media.stream.getTracks()) {
-          const sender = entry.pc.getSenders().find((s) => s.track?.kind === track.kind);
-          if (sender) await sender.replaceTrack(track);
-          else entry.pc.addTrack(track, media.stream);
-        }
-      }
-    }
     this._emit({
-      self: this.state.self ? { ...this.state.self, micOn: media.mic, camOn: media.cam } : null,
+      self: this.state.self ? { ...this.state.self, micOn: false, camOn: media.cam } : null,
     });
-    this._sendSignal({ type: 'peer:state', patch: { micOn: media.mic, camOn: media.cam } });
+    this._sendSignal({ type: 'peer:state', patch: { micOn: false, camOn: media.cam } });
+    if (this.callsSessionId && media.cam) {
+      await this.publishLocalCamTrack();
+    }
   }
 
   softRefresh() {
-    if (this.audioCtx && this.audioCtx.state === 'suspended') {
-      this.audioCtx.resume().catch(() => {});
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      if (this.joinConfig && this.state.status === 'connected') {
+        this._connectWebSocket({
+          ...this.joinConfig,
+          camOn: this.state.self?.camOn ?? this.joinConfig.camOn,
+        });
+      }
+    } else {
+      try {
+        this.ws.send(JSON.stringify({ type: 'ping' }));
+      } catch {
+        // ignore
+      }
     }
-    if (this.pollActive) {
-      this._sendSignal({ type: 'room:sync' });
-    } else if (this.joinConfig && this.state.status === 'connected') {
-      this._connectRoomChannel({
-        ...this.joinConfig,
-        micOn: this.state.self?.micOn ?? this.joinConfig.micOn,
-        camOn: this.state.self?.camOn ?? this.joinConfig.camOn,
-      });
+    if (this.callsSessionId) {
+      this._syncRemoteSubscriptions();
     }
-    if (this.state.sfuMode === 'metered-sfu' && !this.meteredJoined) {
-      this._connectMeteredSFU();
-    }
-    this._refreshWeakConnection();
   }
 
   clearWave() {
@@ -2044,31 +1577,31 @@ export class RoomEngine {
     if (this.state.hostMuteNotice) this._emit({ hostMuteNotice: null });
   }
 
-  clearParticipantJoin() {
-    if (this.state.lastParticipantJoin) this._emit({ lastParticipantJoin: null });
-  }
-
   destroy() {
     this._destroyed = true;
     window.removeEventListener('pagehide', this._onPageHide);
-    window.clearInterval(this._speakingInterval);
     window.clearInterval(this._typingPruneInterval);
     this.manualLeave = true;
     if (this.reconnectTimer) window.clearTimeout(this.reconnectTimer);
-    this._stopRoomPolling();
+    if (this._pendingEmitterClaim) {
+      window.clearTimeout(this._pendingEmitterClaim.timer);
+      this._pendingEmitterClaim = null;
+    }
     if (this.roomCode) {
       this._sendSignal({ type: 'room:leave' });
       this.roomCode = '';
     }
-    this._closeAllConnections();
+    this._stopSocket();
+    this._stopPolling();
+    this._closeSfuConnection();
     if (this.state.localStream) {
       this.state.localStream.getTracks().forEach((t) => t.stop());
     }
+    if (this.state.broadcastStream) {
+      this.state.broadcastStream.getTracks().forEach((t) => t.stop());
+    }
     if (this.state.screenStream) {
       this.state.screenStream.getTracks().forEach((t) => t.stop());
-    }
-    if (this.audioCtx) {
-      this.audioCtx.close().catch(() => {});
     }
   }
 }

@@ -383,4 +383,39 @@ export function renderBrandWordmarkHtml({ compact = false } = {}) {
   `;
 }
 
+export function iconBroadcastPro(isLive = false) {
+  return `<svg viewBox="0 0 28 28" class="ss-svg ss-bp-svg ${isLive ? 'is-live' : ''}" aria-hidden="true">
+    <circle cx="14" cy="14" r="12.2" class="ss-bp-ring" stroke-opacity="0.34" />
+    <path class="ss-bp-w2" d="M5.4 9.2a10 10 0 0 0 0 9.6M22.6 9.2a10 10 0 0 1 0 9.6" />
+    <path class="ss-bp-w1" d="M8.1 10.9a6.6 6.6 0 0 0 0 6.2M19.9 10.9a6.6 6.6 0 0 1 0 6.2" />
+    <polygon points="11.6,10.2 18.4,14 11.6,17.8" fill="currentColor" stroke="none" />
+    <circle cx="23.2" cy="4.8" r="2.2" class="ss-bp-led" stroke="none" />
+  </svg>`;
+}
+
+export function iconPlay() {
+  return `<svg viewBox="0 0 24 24" class="ss-svg" aria-hidden="true"><polygon points="7,5 19,12 7,19" fill="currentColor" stroke="none"/></svg>`;
+}
+
+export function iconPause() {
+  return `<svg viewBox="0 0 24 24" class="ss-svg" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor" stroke="none"/><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor" stroke="none"/></svg>`;
+}
+
+export function iconNext() {
+  return `<svg viewBox="0 0 24 24" class="ss-svg" aria-hidden="true"><polygon points="5,6 15,12 5,18" fill="currentColor" stroke="none"/><path d="M18 6v12"/></svg>`;
+}
+
+export function iconPrev() {
+  return `<svg viewBox="0 0 24 24" class="ss-svg" aria-hidden="true"><polygon points="19,6 9,12 19,18" fill="currentColor" stroke="none"/><path d="M6 6v12"/></svg>`;
+}
+
+export function iconLoop() {
+  return `<svg viewBox="0 0 24 24" class="ss-svg" aria-hidden="true"><path d="M17 4l3 3-3 3"/><path d="M4 11V9a2 2 0 0 1 2-2h14"/><path d="M7 20l-3-3 3-3"/><path d="M20 13v2a2 2 0 0 1-2 2H4"/></svg>`;
+}
+
+export function iconVolume() {
+  return `<svg viewBox="0 0 24 24" class="ss-svg" aria-hidden="true"><path d="M4 10v4h4l5 4V6L8 10H4Z"/><path d="M16.5 8.5a5 5 0 0 1 0 7"/><path d="M19 6a8.5 8.5 0 0 1 0 12"/></svg>`;
+}
+
+
 

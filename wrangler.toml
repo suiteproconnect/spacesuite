@@ -1,0 +1,14 @@
+name = "spacesuite"
+pages_build_output_dir = "."
+compatibility_date = "2025-05-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "spacesuite-db"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+[[durable_objects.bindings]]
+name = "ROOM_DO"
+class_name = "RoomDurableObject"
+script_name = "spacesuite-do"

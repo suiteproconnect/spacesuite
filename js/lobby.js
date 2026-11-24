@@ -12,7 +12,6 @@ import {
   iconHeartbeat,
   iconInvite,
   iconLeave,
-  iconLock,
   iconReaction,
   iconSendPlane,
   iconShare,
@@ -20,31 +19,17 @@ import {
   iconSuperKey,
   iconUsers,
   playSpatialHeartbeatSound,
-  renderBrandIsotipoHtml,
-  renderBrandWordmarkHtml,
 } from './icons.js';
 import {
   addLatidos,
   buildRoomInviteUrl,
   clearSuiteUser,
-  generateCleanRoomCode,
   getLatidosBalance,
   getStoredName,
   loadPrefs,
-  loadSpaceDraftProfile,
-  normalizeRoomCode,
   savePrefs,
-  saveSpaceDraftProfile,
   saveSuiteUser,
 } from './identity.js';
-import {
-  disableOneSignalNotifications,
-  enableOneSignalNotifications,
-  getNotificationDiscretePref,
-  getNotificationStatus,
-  syncOneSignalRoomTag,
-  toggleNotificationDiscreteMode,
-} from './push.js';
 import {
   AdminPanelController,
   SuperKeyController,
@@ -52,7 +37,6 @@ import {
   bindShareSheetEvents,
   renderMiniTiendaHtml,
   renderShareSheetHtml,
-  renderSpaceConfigSheetHtml,
 } from './sheets.js';
 
 export class LobbyController {
@@ -99,15 +83,6 @@ export class LobbyController {
     this.serverStatus = { loaded: false, hasAdmin: false, requiresAdminKey: false };
     this._adminTouched = false;
     this.prefs = loadPrefs();
-    this.pushState = {
-      provider: 'onesignal',
-      configured: false,
-      supported: true,
-      permission: 'default',
-      subscribed: false,
-      discrete: getNotificationDiscretePref(),
-      busy: false,
-    };
 
     this.isIOS =
       typeof navigator !== 'undefined' &&
@@ -118,14 +93,6 @@ export class LobbyController {
     this._bindGlobalEvents();
     this._validateSession();
     this._fetchServerStatus();
-    this._refreshPushState();
-  }
-
-  async _refreshPushState() {
-    const st = await getNotificationStatus().catch(() => null);
-    if (!st || this._destroyed) return;
-    this.pushState = { ...this.pushState, ...st };
-    if (this.sheet === 'prefs') this._renderSheet();
   }
 
   _fetchServerStatus() {
@@ -240,28 +207,26 @@ export class LobbyController {
   }
 
   _handleEnterSuite() {
-    const suiteProfile = loadSpaceDraftProfile();
     if (this.user?.suiteCode) {
-      const code = normalizeRoomCode(this.user.suiteCode) || this.user.suiteCode;
-      syncOneSignalRoomTag(code);
       this.onEnterRoom({
-        roomCode: code,
+        roomCode: this.user.suiteCode,
         pass: this.user.suitePass,
         name: this.user.name,
         wantHost: true,
-        suiteProfile,
       });
       return;
     }
-    const storedName = getStoredName() || 'Invitado';
-    const code = generateCleanRoomCode();
-    syncOneSignalRoomTag(code);
-    this.onEnterRoom({
-      roomCode: code,
-      name: storedName,
-      wantHost: true,
-      suiteProfile,
-    });
+    const storedName = getStoredName() || '';
+    if (storedName) {
+      const code = 'SS-SALA-' + Math.random().toString(36).substring(2, 8).toUpperCase();
+      this.onEnterRoom({
+        roomCode: code,
+        name: storedName,
+        wantHost: true,
+      });
+      return;
+    }
+    this._setScreen('reg');
   }
 
   _setScreen(next) {
@@ -315,70 +280,44 @@ export class LobbyController {
     const showShareSuite = isStandalone || Boolean(u);
 
     const pwaBtnHtml = showShareSuite
-      ? `<button type="button" class="inst" data-act="share-suite-bonus">
+      ? `<button type="button" class="inst" data-act="share-suite-bonus" style="border-color:rgba(217,4,41,0.45);background:rgba(217,4,41,0.12);margin:0 auto 14px">
           ${iconReaction('heartbeat')}
-          <span>COMPARTIR SUITE</span>
-          <small>7 días privada + 3 Latidos</small>
+          <span style="color:#fff;font-weight:700">COMPARTIR SUITE</span>
+          <small style="color:#ff5e79">7 días de Suite privada + 3 Latidos</small>
         </button>`
-      : `<button type="button" class="inst" data-act="install">
+      : `<button type="button" class="inst" data-act="install" style="margin:0 auto 14px">
           ${iconDownload()}
-          <span>INSTALAR APP</span>
+          <span style="font-weight:700">INSTALAR APP</span>
           <small>Un toque directo</small>
         </button>`;
 
     let body = '';
     if (sc === 'welcome') {
       body = `
-        <header class="welcome-top-bar">
-          ${pwaBtnHtml}
-        </header>
-        <div class="tr-body welcome-body">
-          <button type="button" class="tlg-btn welcome-logo-btn" data-act="refresh" aria-label="Actualizar app">
-            <div class="tr-logo ${this.logoRefreshing ? 'refreshing' : ''}">${renderBrandIsotipoHtml({ size: 'md', live: true, idPrefix: 'wel-iso' })}</div>
+        <div class="tr-body">
+          <button type="button" class="tlg-btn" style="margin:0 auto 12px;width:112px;height:112px;border-radius:26px" data-act="refresh" aria-label="Actualizar app">
+            <img class="tr-logo ${this.logoRefreshing ? 'refreshing' : ''}" style="margin:0" src="/assets/logo-icon.png" alt="SPACE SUITE" width="112" height="112" />
           </button>
-          <div class="tr-wm">${renderBrandWordmarkHtml()}</div>
-          <h2 class="welcome-title">Bienvenido a SPACE SUITE</h2>
-          <p class="welcome-sub">Un espacio hecho para sentir y conectar sin barreras</p>
+          <div class="tr-wm" style="margin-bottom:6px"><span>SPACE</span><b>SUITE</b></div>
+          <h2 style="font-size:1.28rem;line-height:1.28;margin:0 auto 8px;max-width:320px;letter-spacing:-0.02em">Bienvenido a SPACE SUITE. Un espacio hecho para sentir y conectar sin barreras</h2>
+          <p style="font-size:0.86rem;color:var(--dim);margin:0 auto 14px;max-width:300px;line-height:1.4">Audio espacial, subtítulos en vivo y latidos para conectar cara a cara.</p>
 
-          <div class="space-superkey-card welcome-sk-card">
-            <div class="space-sk-icon">${iconSuperKey()}</div>
-            <div class="space-sk-copy">
-              <b>SUPER KEY</b>
-              <p>Qué onda, bienvenido. Tómate tu espacio con calma, aquí conectas libre, privado y sin barreras a tu ritmo.</p>
-            </div>
+          <div style="display:flex;justify-content:center;margin-bottom:12px">
+            <button type="button" class="btn-superkey" data-act="open-superkey">
+              ${iconSuperKey()}
+              <span>SUPER KEY</span>
+            </button>
           </div>
 
-          <div class="plans-container welcome-plans">
-            <div class="plan-touch-card" role="button" tabindex="0" data-act="plan-vip">
-              <div class="plan-line-1">
-                <span class="plan-name">VIP Ilimitado</span>
-                <span class="plan-price">$20.30 USD <small>/ sem</small></span>
-              </div>
-              <div class="plan-line-2">Salas de hasta 20 personas sin límite de tiempo y video 720p.</div>
-              <div class="plan-line-3">10 Latidos incluidos · Audio espacial completo.</div>
-            </div>
-
-            <div class="plan-touch-card" role="button" tabindex="0" data-act="plan-connect">
-              <div class="plan-line-1">
-                <span class="plan-name">Connect 30 Días</span>
-                <span class="plan-price">$24.50 USD <small>único</small></span>
-              </div>
-              <div class="plan-line-2">120 llamadas directas cara a cara y enlace privado permanente.</div>
-              <div class="plan-line-3">Acceso estable multiplataforma sin cortes.</div>
-            </div>
-
-            <div class="plan-touch-card" role="button" tabindex="0" data-act="plan-shield">
-              <div class="plan-line-1">
-                <span class="plan-name">Pase Escudo 14 Días</span>
-                <span class="plan-price">$14.00 USD <small>único</small></span>
-              </div>
-              <div class="plan-line-2">Acceso completo cara a cara sin restricciones de horario.</div>
-              <div class="plan-line-3">50 timbres de cortesía y soporte de SUPER KEY.</div>
-            </div>
-          </div>
+          ${pwaBtnHtml}
         </div>
         <div class="tr-bar">
-          <button type="button" class="tr-b entry-crimson-btn" data-act="enter-suite">Entrar a tu Suite</button>
+          <button type="button" class="tr-b" data-act="enter-suite" style="font-size:1.02rem;padding:15px;font-weight:700">Entrar a tu Suite</button>
+          <div class="tr-row2" style="margin-top:6px">
+            <button type="button" class="tr-k" data-go="login">Tengo cuenta</button>
+            <button type="button" class="tr-k" data-go="code">Entrar con código</button>
+            <button type="button" class="tr-k" data-go="plans">Planes</button>
+          </div>
         </div>
       `;
     } else if (sc === 'reg') {
@@ -406,16 +345,16 @@ export class LobbyController {
                 <input type="checkbox" data-check="regWantAdmin" ${f.regWantAdmin ? 'checked' : ''} />
                 <span>${
                   this.serverStatus.loaded && !this.serverStatus.hasAdmin
-                    ? 'Configurar como Cuenta Principal (acceso total)'
-                    : 'Registrar como Cuenta Principal'
+                    ? 'Configurar como Administrador principal (acceso total)'
+                    : 'Registrar como Administrador'
                 }</span>
               </label>
               ${
                 f.regWantAdmin && this.serverStatus.hasAdmin
                   ? `<input type="password" maxlength="80" placeholder="${
                       this.serverStatus.requiresAdminKey
-                        ? 'Clave de acceso principal (ADMIN_SETUP_KEY)'
-                        : 'Código de autorización principal'
+                        ? 'Clave de administrador (ADMIN_SETUP_KEY)'
+                        : 'Código de autorización de administrador'
                     }" data-field="regAdminKey" value="${esc(f.regAdminKey)}" autocomplete="off" />`
                   : ''
               }
@@ -475,7 +414,7 @@ export class LobbyController {
         <div class="tr-body">
           <div class="lb-h">
             <button type="button" class="tlg-btn" data-act="refresh" aria-label="Actualizar inicio">
-              <div class="lb-logo ${this.logoRefreshing ? 'refreshing' : ''}">${renderBrandIsotipoHtml({ size: 'sm', live: true, idPrefix: 'hom-iso' })}</div>
+              <img class="lb-logo ${this.logoRefreshing ? 'refreshing' : ''}" src="/assets/logo-icon.png" alt="SPACE SUITE" width="60" height="60" />
             </button>
             <div>
               <b>Hola, ${esc(u.name)}</b>
@@ -483,8 +422,8 @@ export class LobbyController {
             </div>
           </div>
 
-          <div class="home-primary-row">
-            <button type="button" class="tr-b" data-act="enter-suite">Entrar a mi Suite</button>
+          <div style="display:flex;gap:10px;margin-bottom:12px">
+            <button type="button" class="tr-b" data-act="enter-suite" style="flex:1;padding:12px;font-size:0.95rem;font-weight:700">Entrar a mi Suite</button>
             <button type="button" class="btn-superkey" data-act="open-superkey">
               ${iconSuperKey()}
               <span>SUPER KEY</span>
@@ -498,26 +437,25 @@ export class LobbyController {
             <button type="button" class="lb-t" data-sheet="invite">${iconSendPlane()}<span>Invitar</span></button>
             ${
               u.role === 'admin'
-                ? `<button type="button" class="lb-t" data-sheet="admin">${iconChart()}<span>Panel Control</span></button>`
+                ? `<button type="button" class="lb-t" data-sheet="admin">${iconChart()}<span>Panel Admin</span></button>`
                 : `<button type="button" class="lb-t" data-go="plans">${iconShield()}<span>Planes</span></button>`
             }
           </div>
 
           <div class="lb-card">
             <span>Mi SUITE · siempre la misma</span>
-            <b>${esc(normalizeRoomCode(u.suiteCode) || u.suiteCode)}</b>
-            <small>Enlace directo ?room=${esc(normalizeRoomCode(u.suiteCode) || u.suiteCode)}</small>
+            <b>${esc(u.suiteCode)}</b>
+            <small>Clave ${esc(u.suitePass)}</small>
             <div class="lb-card-actions">
-              <button type="button" data-act="copy-own">Copiar enlace</button>
+              <button type="button" data-act="copy-own">Copiar código y clave</button>
               <button type="button" data-sheet="invite">Compartir</button>
-              <button type="button" data-sheet="space-config">Personalizar SPACE</button>
             </div>
           </div>
 
-          <button type="button" class="inst" data-act="share-suite-bonus">
+          <button type="button" class="inst" data-act="share-suite-bonus" style="border-color:rgba(217,4,41,0.45);background:rgba(217,4,41,0.12)">
             ${iconReaction('heartbeat')}
-            <span>COMPARTIR SUITE</span>
-            <small>7 días privada + 3 Latidos</small>
+            <span style="color:#fff;font-weight:700">COMPARTIR SUITE</span>
+            <small style="color:#ff5e79">7 días de Suite privada + 3 Latidos al invitar</small>
           </button>
         </div>
         <div class="tr-bar">
@@ -532,13 +470,13 @@ export class LobbyController {
         <form id="lobby-code-form" style="display:flex;flex-direction:column;height:100%">
           <div class="tr-body">
             <h2>Entrar a una SUITE</h2>
-            <p>Escribe el código de 6 letras o pega el enlace directo que te compartieron.</p>
-            <input type="text" maxlength="24" placeholder="Tu nombre o alias en SPACE" data-field="joinName" value="${esc(f.joinName)}" />
-            <input type="text" maxlength="160" placeholder="Ej. K9M4P2 (o pega el enlace)" data-field="joinCode" value="${esc(f.joinCode)}" autocapitalize="characters" autocomplete="off" />
-            <input type="text" maxlength="8" placeholder="Clave (solo si tiene)" data-field="joinPass" value="${esc(f.joinPass)}" autocapitalize="characters" autocomplete="off" />
+            <p>Escribe el código y la clave que te compartieron.</p>
+            <input type="text" maxlength="24" placeholder="Tu nombre en la sala" data-field="joinName" value="${esc(f.joinName)}" />
+            <input type="text" maxlength="24" placeholder="SS-SALA-XXXXXXXXXX" data-field="joinCode" value="${esc(f.joinCode)}" autocapitalize="characters" autocomplete="off" />
+            <input type="text" maxlength="8" placeholder="Clave (4 caracteres, opcional)" data-field="joinPass" value="${esc(f.joinPass)}" autocapitalize="characters" autocomplete="off" />
           </div>
           <div class="tr-bar">
-            <button type="submit" class="tr-b">Ir a SPACE</button>
+            <button type="submit" class="tr-b">Entrar</button>
             <button type="button" class="tr-g" data-go="${u ? 'home' : 'welcome'}">Volver</button>
           </div>
         </form>
@@ -654,11 +592,6 @@ export class LobbyController {
       return;
     }
 
-    if (sh === 'space-config') {
-      this.sheetSlot.innerHTML = renderSpaceConfigSheetHtml(loadSpaceDraftProfile());
-      return;
-    }
-
     if (sh === 'acct' && u) {
       this.sheetSlot.innerHTML = `
         <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh">
@@ -668,7 +601,7 @@ export class LobbyController {
           <div id="sf">
             ${
               u.role === 'admin'
-                ? `<div class="row"><span><b>Panel de Control</b><small>Métricas en vivo, salas y usuarios</small></span><button type="button" class="orb sm is-active" data-lsh="admin">${iconChart()}</button></div>`
+                ? `<div class="row"><span><b>Panel Admin Pro</b><small>Métricas en vivo, salas y usuarios</small></span><button type="button" class="orb sm active-mint" data-lsh="admin">${iconChart()}</button></div>`
                 : ''
             }
             <div class="row"><span><b>Planes</b><small>Cambiar o renovar tu plan</small></span><button type="button" class="orb sm" data-lsh="plans">${iconCheck()}</button></div>
@@ -680,15 +613,15 @@ export class LobbyController {
             </div>
             ${
               this.editingName
-                ? `<form id="lobby-name-form" class="inline-name-form">
-                    <input id="lobby-draft-name" type="text" maxlength="24" value="${esc(this.draftName)}" placeholder="Tu nombre" />
-                    <button type="submit" class="tr-b inline-save-btn">Guardar</button>
+                ? `<form id="lobby-name-form" style="display:flex;gap:8px;margin-top:4px;margin-bottom:8px">
+                    <input id="lobby-draft-name" type="text" maxlength="24" value="${esc(this.draftName)}" placeholder="Tu nombre" style="flex:1;min-width:0;padding:10px 12px;border-radius:12px;border:1px solid var(--ln);background:var(--s2);color:var(--moon);font:500 0.92rem var(--sys);outline:none" />
+                    <button type="submit" style="padding:0 14px;border-radius:12px;border:0;background:var(--green);color:var(--ink);font:600 0.88rem var(--sys);cursor:pointer">Guardar</button>
                   </form>`
                 : ''
             }
-            <div class="row"><span><b>Sonidos y avisos</b><small>Sonido, vibración y notificaciones</small></span><button type="button" class="orb sm" data-lsh="prefs">${iconBell()}</button></div>
+            <div class="row"><span><b>Sonidos y avisos</b><small>Sonido y vibración</small></span><button type="button" class="orb sm" data-lsh="prefs">${iconBell()}</button></div>
             <div class="row"><span><b>Compartir la app</b><small>Envía el enlace por WhatsApp, Telegram o X</small></span><button type="button" class="orb sm" data-lsh="shareapp">${iconShare()}</button></div>
-            <div class="row"><span><b class="text-danger">Cerrar sesión</b><small>Sales de tu cuenta en este teléfono</small></span><button type="button" class="orb sm rm" data-lsh="logout">${iconLeave()}</button></div>
+            <div class="row"><span><b style="color:var(--danger)">Cerrar sesión</b><small>Sales de tu cuenta en este teléfono</small></span><button type="button" class="orb sm rm" data-lsh="logout">${iconLeave()}</button></div>
           </div>
         </section>
       `;
@@ -699,41 +632,19 @@ export class LobbyController {
     }
 
     if (sh === 'prefs') {
-      const ps = this.pushState;
-      const pushRoom = this.user?.suiteCode ? normalizeRoomCode(this.user.suiteCode) : '';
       this.sheetSlot.innerHTML = `
         <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh">
           <button type="button" class="orb sm x" data-lsh="close" aria-label="Cerrar">${iconClose()}</button>
           <h2 id="sh">Sonidos y avisos</h2>
-          <p id="sp">Preferencias de sonido, vibración y estructura lista para OneSignal.</p>
+          <p id="sp">Controla cómo te avisa la app.</p>
           <div id="sf">
             <div class="row">
               <span><b>Sonidos</b><small>Al tocar, entrar, salir y mensajes</small></span>
-              <button type="button" class="orb sm ${this.prefs.snd ? 'is-active' : ''}" data-pref="snd">${iconBell(!this.prefs.snd)}</button>
+              <button type="button" class="orb sm ${this.prefs.snd ? 'active-mint' : ''}" data-pref="snd">${iconBell(!this.prefs.snd)}</button>
             </div>
             <div class="row">
               <span><b>Vibración</b><small>Al tocar botones y cuando llega alguien</small></span>
-              <button type="button" class="orb sm ${this.prefs.vib ? 'is-active' : ''}" data-pref="vib">${iconBell(!this.prefs.vib)}</button>
-            </div>
-            <div class="row">
-              <span><b>Notificaciones (OneSignal)</b><small>${
-                !ps.supported
-                  ? 'No compatible en este navegador'
-                  : ps.subscribed
-                    ? `Preferencia activa${pushRoom ? ` · Suite ${esc(pushRoom)}` : ''}`
-                    : ps.permission === 'denied'
-                      ? 'Permiso bloqueado en configuración'
-                      : 'Listo para conectar OneSignal cuando lo publiques'
-              }</small></span>
-              <button type="button" class="orb sm ${ps.subscribed ? 'is-active' : ''}" ${!ps.supported || ps.busy ? 'disabled' : ''} data-push="toggle">${iconBell(!ps.subscribed)}</button>
-            </div>
-            <div class="row">
-              <span><b>Modo discreto</b><small>${
-                ps.discrete
-                  ? 'Oculta nombres y códigos en pantalla bloqueada'
-                  : 'Muestra nombre y código en la notificación'
-              }</small></span>
-              <button type="button" class="orb sm ${ps.discrete ? 'is-active' : ''}" ${ps.busy ? 'disabled' : ''} data-push="discrete">${iconLock(!ps.discrete)}</button>
+              <button type="button" class="orb sm ${this.prefs.vib ? 'active-mint' : ''}" data-pref="vib">${iconBell(!this.prefs.vib)}</button>
             </div>
           </div>
         </section>
@@ -874,19 +785,21 @@ export class LobbyController {
       else if (act === 'plan-shield') this.showToast('Pase Escudo 14 días seleccionado');
       else if (act === 'resend') this._handleResendCode();
       else if (act === 'new-suite' && this.user) {
+        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+        let suffix = '';
+        let pass = '';
+        for (let i = 0; i < 6; i++) suffix += chars[Math.floor(Math.random() * chars.length)];
+        for (let i = 0; i < 4; i++) pass += chars[Math.floor(Math.random() * chars.length)];
         this.onEnterRoom({
-          roomCode: normalizeRoomCode(this.user.suiteCode) || this.user.suiteCode,
-          pass: this.user.suitePass,
+          roomCode: `SS-SALA-${suffix}`,
+          pass,
           name: this.user.name,
           wantHost: true,
-          suiteProfile: loadSpaceDraftProfile(),
         });
       } else if (act === 'copy-own' && this.user) {
-        const cleanCode = normalizeRoomCode(this.user.suiteCode) || this.user.suiteCode;
-        const inviteUrl = buildRoomInviteUrl(cleanCode);
         navigator.clipboard
-          ?.writeText(inviteUrl)
-          .then(() => this.showToast('Enlace directo copiado'))
+          ?.writeText(`Código: ${this.user.suiteCode}\nClave: ${this.user.suitePass}`)
+          .then(() => this.showToast('Copiado'))
           .catch(() => this.showToast('No se pudo copiar'));
       } else if (act === 'logout') {
         this._logout();
@@ -902,18 +815,6 @@ export class LobbyController {
     });
 
     this.sheetSlot.addEventListener('click', (e) => {
-      const resetSpace = e.target.closest('[data-act="reset-space-config"]');
-      if (resetSpace) {
-        saveSpaceDraftProfile(null);
-        this.showToast('SPACE usará la escena espacial por defecto');
-        this._setSheet(null);
-        return;
-      }
-      const closeAct = e.target.closest('[data-act="close"]');
-      if (closeAct) {
-        this._setSheet(null);
-        return;
-      }
       const lsh = e.target.closest('[data-lsh]')?.getAttribute('data-lsh');
       if (lsh) {
         if (lsh === 'close') this._setSheet(null);
@@ -941,12 +842,6 @@ export class LobbyController {
         this.prefs = { ...this.prefs, [prefKey]: !this.prefs[prefKey] };
         savePrefs(this.prefs);
         this._renderSheet();
-        return;
-      }
-
-      const pushAct = e.target.closest('[data-push]')?.getAttribute('data-push');
-      if (pushAct) {
-        this._handlePushAction(pushAct);
       }
     });
 
@@ -957,17 +852,6 @@ export class LobbyController {
     });
 
     this.sheetSlot.addEventListener('submit', async (e) => {
-      if (e.target.id === 'space-config-form') {
-        e.preventDefault();
-        const title = this.sheetSlot.querySelector('#spc-title')?.value || '';
-        const description = this.sheetSlot.querySelector('#spc-desc')?.value || '';
-        const coverVideo = this.sheetSlot.querySelector('#spc-cover-vid')?.value || '';
-        const coverImage = this.sheetSlot.querySelector('#spc-cover-img')?.value || '';
-        saveSpaceDraftProfile({ title, description, coverVideo, coverImage });
-        this.showToast('Recibidor SPACE actualizado');
-        this._setSheet(null);
-        return;
-      }
       if (e.target.id !== 'lobby-name-form' || !this.user) return;
       e.preventDefault();
       const trimmed = this.draftName.trim().slice(0, 24);
@@ -1007,45 +891,6 @@ export class LobbyController {
     this._setSheet(null);
     this._setScreen('welcome');
     this.showToast('Sesión cerrada');
-  }
-
-  async _handlePushAction(act) {
-    if (this.pushState.busy) return;
-    if (act === 'discrete') {
-      const nextDiscrete = !this.pushState.discrete;
-      this.pushState = { ...this.pushState, busy: true };
-      this._renderSheet();
-      const res = await toggleNotificationDiscreteMode(nextDiscrete);
-      this.pushState = { ...this.pushState, discrete: res.discrete, busy: false };
-      this._renderSheet();
-      this.showToast(
-        nextDiscrete
-          ? 'Modo discreto activo: avisos sin nombres ni códigos'
-          : 'Modo detallado activo en tus notificaciones',
-      );
-      return;
-    }
-    if (act === 'toggle') {
-      this.pushState = { ...this.pushState, busy: true };
-      this._renderSheet();
-      if (this.pushState.subscribed) {
-        await disableOneSignalNotifications();
-        this.pushState = { ...this.pushState, subscribed: false, busy: false };
-        this._renderSheet();
-        this.showToast('Notificaciones desactivadas');
-      } else {
-        const roomCode = this.user?.suiteCode ? normalizeRoomCode(this.user.suiteCode) : 'ORBIT6';
-        const res = await enableOneSignalNotifications({ roomCode, discrete: this.pushState.discrete });
-        await this._refreshPushState();
-        this.pushState = { ...this.pushState, busy: false };
-        this._renderSheet();
-        if (res.ok) {
-          this.showToast('Notificaciones listas para OneSignal');
-        } else {
-          this.showToast(res.error || 'No se pudieron activar las notificaciones');
-        }
-      }
-    }
   }
 
   async _handleRegister() {
@@ -1207,8 +1052,13 @@ export class LobbyController {
   }
 
   _handleJoinByCode() {
-    const normalizedCode = normalizeRoomCode(this.form.joinCode);
-    if (normalizedCode.length < 4) return this.showToast('Escribe un código o enlace válido');
+    const cleanCode = this.form.joinCode.trim().toUpperCase().replace(/\s+/g, '');
+    if (cleanCode.length < 4) return this.showToast('Escribe el código de SUITE');
+    const normalizedCode = cleanCode.startsWith('SS-SALA-')
+      ? cleanCode
+      : cleanCode.length === 10 && /^[A-Z0-9]+$/.test(cleanCode)
+        ? `SS-SALA-${cleanCode}`
+        : cleanCode;
     const finalName = this.form.joinName.trim() || this.user?.name || 'Invitado';
     this.onEnterRoom({
       roomCode: normalizedCode,

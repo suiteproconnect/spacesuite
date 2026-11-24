@@ -6,6 +6,7 @@
       "name": "spacesuite",
       "dependencies": {
         "@google/genai": "^3.3.0",
+        "ws": "^8.23.0",
       },
     },
   },

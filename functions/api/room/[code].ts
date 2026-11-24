@@ -7,8 +7,8 @@ import {
   type ChatMessage,
   type PagesContext,
   type PeerInfo,
+  type RoomBroadcastState,
   type RoomInteractiveState,
-  type SuiteProfile,
 } from '../../_shared/cf.ts';
 import {
   addAuditEvent,
@@ -27,27 +27,16 @@ import {
   upsertRoomParticipant,
 } from '../../_shared/store.ts';
 
-function sanitizeMediaUrl(raw: unknown): string {
-  const s = typeof raw === 'string' ? raw.trim().slice(0, 600) : '';
-  if (!s) return '';
-  if (/^(https?:\/\/|\/assets\/|data:image\/)/i.test(s)) return s;
-  return '';
-}
-
-function sanitizeSuiteProfile(raw: unknown, updatedBy?: string): SuiteProfile | null {
-  if (!raw || typeof raw !== 'object') return null;
-  const obj = raw as Record<string, unknown>;
-  const title = typeof obj.title === 'string' ? obj.title.trim().slice(0, 80) : '';
-  const description = typeof obj.description === 'string' ? obj.description.trim().slice(0, 220) : '';
-  const coverImage = sanitizeMediaUrl(obj.coverImage);
-  const coverVideo = sanitizeMediaUrl(obj.coverVideo);
-  if (!title && !description && !coverImage && !coverVideo) return null;
+function idleBroadcast(): RoomBroadcastState {
   return {
-    title: title || undefined,
-    description: description || undefined,
-    coverImage: coverImage || undefined,
-    coverVideo: coverVideo || undefined,
-    updatedBy: updatedBy ? updatedBy.slice(0, 32) : undefined,
+    emitterPeerId: null,
+    emitterName: null,
+    status: 'idle',
+    sourceType: 'none',
+    mediaTitle: null,
+    callsSessionId: null,
+    videoTrackName: null,
+    audioTrackName: null,
     updatedAt: Date.now(),
   };
 }
@@ -59,7 +48,7 @@ export async function onRequestGet(context: PagesContext<{ code?: string }>): Pr
 
   if (!poll) {
     const summary = await getRoomSummary(context.env, code);
-    return jsonResponse({ ok: true, ...summary });
+    return jsonResponse(summary);
   }
 
   const peerId = (url.searchParams.get('peerId') || '').trim();
@@ -141,14 +130,14 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
 
     await cleanupStaleParticipants(context.env, code);
     const state = await getOrCreateRoomState(context.env, code, wantHost ? cleanPass : undefined, true);
-    const { active, waiting } = await getRoomParticipants(context.env, code);
+    const { active } = await getRoomParticipants(context.env, code);
 
     if (state.blockedClientIds.includes(clientId)) {
       return jsonResponse({
         ok: true,
         type: 'room:rejected',
         reason: 'blocked',
-        message: 'Esta Suite tiene el acceso restringido para tu dispositivo.',
+        message: 'El anfitrión bloqueó el acceso a esta sala.',
       });
     }
 
@@ -156,18 +145,10 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
     const shouldBeHost =
       !state.meta.hostId ||
       (active.length === 0 && wantHost) ||
-      (alreadyActive?.role === 'host');
+      alreadyActive?.role === 'host';
 
     if (shouldBeHost && cleanPass) {
       state.meta.pass = cleanPass;
-    }
-
-    if (shouldBeHost && body.suiteProfile && typeof body.suiteProfile === 'object') {
-      const nextProfile = sanitizeSuiteProfile(body.suiteProfile, cleanName);
-      if (nextProfile) {
-        state.meta.interactive = { ...(state.meta.interactive || {}), suiteProfile: nextProfile };
-        state.meta.suiteProfile = nextProfile;
-      }
     }
 
     if (!alreadyActive && active.length >= MAX_ROOM_PARTICIPANTS) {
@@ -184,7 +165,7 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
         ok: true,
         type: 'room:rejected',
         reason: 'locked',
-        message: 'Esta Suite está cerrada temporalmente.',
+        message: 'El anfitrión bloqueó la sala.',
       });
     }
 
@@ -203,18 +184,22 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
       });
     }
 
-    if (state.meta.waitingRoom && !shouldBeHost && !alreadyActive) {
+    if (state.meta.waitingRoom && !shouldBeHost && !state.admittedClientIds.includes(clientId)) {
       const waitInfo: PeerInfo = {
         peerId: peerId || crypto.randomUUID(),
         clientId,
         name: cleanName,
         initial: getInitial(cleanName),
         role: 'guest',
-        micOn: Boolean(body.micOn),
+        micOn: false,
+        micLocked: true,
         camOn: Boolean(body.camOn),
+        isEmitter: false,
         handRaised: false,
         screenSharing: false,
         speaking: false,
+        callsSessionId: typeof body.callsSessionId === 'string' ? body.callsSessionId : null,
+        camTrackName: typeof body.camTrackName === 'string' ? body.camTrackName : null,
         joinedAt: Date.now(),
       };
       await upsertRoomParticipant(context.env, code, waitInfo, 'waiting');
@@ -224,7 +209,6 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
         type: 'room:waiting',
         roomCode: code,
         name: cleanName,
-        meta: state.meta,
         lastEventId,
       });
     }
@@ -237,17 +221,22 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
       state.admittedClientIds.push(clientId);
     }
 
+    const isEmitter = state.meta.emitterPeerId === peerId;
     const info: PeerInfo = {
       peerId: peerId || crypto.randomUUID(),
       clientId,
       name: cleanName,
       initial: getInitial(cleanName),
       role,
-      micOn: Boolean(body.micOn),
-      camOn: Boolean(body.camOn),
+      micOn: false,
+      micLocked: true,
+      camOn: isEmitter ? false : Boolean(body.camOn),
+      isEmitter,
       handRaised: alreadyActive?.handRaised ?? false,
-      screenSharing: alreadyActive?.screenSharing ?? false,
+      screenSharing: isEmitter,
       speaking: false,
+      callsSessionId: typeof body.callsSessionId === 'string' ? body.callsSessionId : alreadyActive?.callsSessionId ?? null,
+      camTrackName: typeof body.camTrackName === 'string' ? body.camTrackName : alreadyActive?.camTrackName ?? null,
       joinedAt: alreadyActive?.joinedAt ?? Date.now(),
     };
 
@@ -267,7 +256,7 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
       type: 'room:joined',
       self: info,
       peers: updated.active,
-      waiting: role === 'host' ? updated.waiting : waiting.filter(() => false),
+      waiting: role === 'host' ? updated.waiting : [],
       messages,
       meta: state.meta,
       lastEventId,
@@ -279,6 +268,12 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
   }
 
   if (signalType === 'room:leave') {
+    const state = await getOrCreateRoomState(context.env, code);
+    if (state.meta.emitterPeerId === peerId) {
+      state.meta.emitterPeerId = null;
+      state.meta.broadcast = idleBroadcast();
+      await saveRoomMetaAndLists(context.env, code, state.meta);
+    }
     await removeParticipant(context.env, code, peerId);
     return jsonResponse({ ok: true });
   }
@@ -309,54 +304,111 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
 
   if (signalType === 'peer:state') {
     const rawPatch = (body.patch && typeof body.patch === 'object' ? body.patch : {}) as Partial<PeerInfo>;
-    const patch: Partial<PeerInfo> = {};
-    if (typeof rawPatch.micOn === 'boolean') patch.micOn = rawPatch.micOn;
-    if (typeof rawPatch.camOn === 'boolean') patch.camOn = rawPatch.camOn;
+    const patch: Partial<PeerInfo> = { micOn: false, micLocked: true, speaking: false };
+    if (typeof rawPatch.camOn === 'boolean') {
+      patch.camOn = state.meta.emitterPeerId === peerId ? false : rawPatch.camOn;
+    }
     if (typeof rawPatch.handRaised === 'boolean') patch.handRaised = rawPatch.handRaised;
-    if (typeof rawPatch.screenSharing === 'boolean') patch.screenSharing = rawPatch.screenSharing;
-    if (typeof rawPatch.speaking === 'boolean') patch.speaking = rawPatch.speaking;
+    if (typeof rawPatch.callsSessionId === 'string' || rawPatch.callsSessionId === null) {
+      patch.callsSessionId = rawPatch.callsSessionId;
+    }
+    if (typeof rawPatch.camTrackName === 'string' || rawPatch.camTrackName === null) {
+      patch.camTrackName = rawPatch.camTrackName;
+    }
     if (typeof rawPatch.name === 'string' && rawPatch.name.trim()) {
       patch.name = rawPatch.name.trim().slice(0, 32);
       patch.initial = getInitial(patch.name);
     }
     await patchParticipantState(context.env, code, peerId, patch);
-    if (patch.name) {
-      await pushRoomEvent(
-        context.env,
-        code,
-        'peer:name_updated',
-        { peerId, name: patch.name, initial: patch.initial },
-        null,
-        peerId,
-      );
+    return jsonResponse({ ok: true });
+  }
+
+  if (signalType === 'emitter:claim') {
+    if (state.meta.emitterPeerId && state.meta.emitterPeerId !== peerId) {
+      return jsonResponse({
+        ok: false,
+        type: 'emitter:denied',
+        emitterPeerId: state.meta.emitterPeerId,
+        error: 'Otro participante ya está emitiendo en este momento.',
+      }, 409);
     }
-    return jsonResponse({ ok: true, peer: { ...sender, ...patch } });
+    const sourceType = body.sourceType === 'media' ? 'media' : 'screen';
+    const nextStatus = body.status === 'live' ? 'live' : 'preparing';
+    state.meta.emitterPeerId = peerId;
+    state.meta.broadcast = {
+      emitterPeerId: peerId,
+      emitterName: sender.name,
+      status: nextStatus,
+      sourceType,
+      mediaTitle: typeof body.mediaTitle === 'string' ? body.mediaTitle.slice(0, 80) : null,
+      callsSessionId: typeof body.callsSessionId === 'string' ? body.callsSessionId : sender.callsSessionId || null,
+      videoTrackName: typeof body.videoTrackName === 'string' ? body.videoTrackName : null,
+      audioTrackName: typeof body.audioTrackName === 'string' ? body.audioTrackName : null,
+      updatedAt: Date.now(),
+    };
+    await patchParticipantState(context.env, code, peerId, {
+      isEmitter: true,
+      screenSharing: true,
+      camOn: false,
+    });
+    await saveRoomMetaAndLists(context.env, code, state.meta);
+    return jsonResponse({ ok: true, meta: state.meta });
+  }
+
+  if (signalType === 'broadcast:state') {
+    if (state.meta.emitterPeerId !== peerId) {
+      return jsonResponse({ ok: false, error: 'Solo el emisor activo puede actualizar la transmisión.' }, 403);
+    }
+    const nextStatus = body.status === 'live' ? 'live' : body.status === 'idle' ? 'idle' : 'preparing';
+    if (nextStatus === 'idle') {
+      state.meta.emitterPeerId = null;
+      state.meta.broadcast = idleBroadcast();
+      await patchParticipantState(context.env, code, peerId, { isEmitter: false, screenSharing: false });
+    } else {
+      state.meta.broadcast = {
+        ...state.meta.broadcast,
+        emitterPeerId: peerId,
+        emitterName: sender.name,
+        status: nextStatus,
+        sourceType: body.sourceType === 'media' ? 'media' : body.sourceType === 'screen' ? 'screen' : state.meta.broadcast.sourceType,
+        mediaTitle: typeof body.mediaTitle === 'string' ? body.mediaTitle.slice(0, 80) : state.meta.broadcast.mediaTitle || null,
+        callsSessionId: typeof body.callsSessionId === 'string' ? body.callsSessionId : state.meta.broadcast.callsSessionId || null,
+        videoTrackName: typeof body.videoTrackName === 'string' ? body.videoTrackName : state.meta.broadcast.videoTrackName || null,
+        audioTrackName: body.audioTrackName !== undefined ? (body.audioTrackName ? String(body.audioTrackName) : null) : state.meta.broadcast.audioTrackName || null,
+        updatedAt: Date.now(),
+      };
+    }
+    await saveRoomMetaAndLists(context.env, code, state.meta);
+    return jsonResponse({ ok: true, meta: state.meta });
+  }
+
+  if (signalType === 'emitter:release') {
+    if (state.meta.emitterPeerId === peerId || sender.role === 'host') {
+      const prevId = state.meta.emitterPeerId;
+      state.meta.emitterPeerId = null;
+      state.meta.broadcast = idleBroadcast();
+      if (prevId) {
+        await patchParticipantState(context.env, code, prevId, { isEmitter: false, screenSharing: false });
+      }
+      await saveRoomMetaAndLists(context.env, code, state.meta);
+    }
+    return jsonResponse({ ok: true, meta: state.meta });
   }
 
   if (signalType === 'chat:send') {
     const text = (typeof body.text === 'string' ? body.text : '').trim().slice(0, 500);
     if (!text) return jsonResponse({ ok: true });
     const toPeerId = typeof body.toPeerId === 'string' && body.toPeerId ? body.toPeerId : null;
-    const msgId = typeof body.messageId === 'string' && body.messageId ? body.messageId : crypto.randomUUID();
-    const timestamp = typeof body.timestamp === 'number' && body.timestamp ? body.timestamp : Date.now();
     const chatMsg: ChatMessage = {
-      id: msgId,
+      id: crypto.randomUUID(),
       roomCode: code,
       fromPeerId: peerId,
       fromName: sender.name,
       toPeerId,
       text,
-      timestamp,
+      timestamp: Date.now(),
     };
     await addRoomMessage(context.env, chatMsg);
-    await pushRoomEvent(
-      context.env,
-      code,
-      'chat:message',
-      { message: chatMsg },
-      toPeerId,
-      peerId,
-    );
     return jsonResponse({ ok: true, type: 'chat:message', message: chatMsg });
   }
 
@@ -480,13 +532,6 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
       };
     } else if (act === 'timer:stop') {
       interactive.timer = null;
-    } else if (act === 'suite:profile') {
-      if (sender.role !== 'host') {
-        return jsonResponse({ ok: false, error: 'Solo quien abrió la Suite puede personalizar SPACE.' }, 403);
-      }
-      const nextProfile = sanitizeSuiteProfile(payload, sender.name);
-      interactive.suiteProfile = nextProfile;
-      state.meta.suiteProfile = nextProfile;
     } else {
       return jsonResponse({ ok: false, error: 'Acción interactiva no válida.' }, 400);
     }
@@ -496,20 +541,9 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
     return jsonResponse({ ok: true, meta: state.meta });
   }
 
-  if (signalType === 'webrtc:offer' || signalType === 'webrtc:answer' || signalType === 'webrtc:ice') {
-    const to = typeof body.to === 'string' ? body.to : '';
-    if (!to) return jsonResponse({ ok: false, error: 'Destinatario requerido' }, 400);
-    const payload =
-      signalType === 'webrtc:ice'
-        ? { from: peerId, candidate: body.candidate }
-        : { from: peerId, sdp: body.sdp };
-    await pushRoomEvent(context.env, code, signalType, payload, to, peerId);
-    return jsonResponse({ ok: true });
-  }
-
   if (signalType === 'host:action') {
     if (sender.role !== 'host') {
-      return jsonResponse({ ok: false, error: 'Solo quien abrió la Suite puede ajustar esto.' }, 403);
+      return jsonResponse({ ok: false, error: 'Solo el anfitrión puede hacer eso.' }, 403);
     }
 
     const hostAct = typeof body.action === 'string' ? body.action : '';
@@ -523,6 +557,33 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
       await saveRoomMetaAndLists(context.env, code, state.meta);
     } else if (hostAct === 'spotlight') {
       state.meta.spotlightPeerId = targetPeerId;
+      await saveRoomMetaAndLists(context.env, code, state.meta);
+    } else if (hostAct === 'grantEmitter') {
+      const prevEmitter = state.meta.emitterPeerId;
+      if (prevEmitter && prevEmitter !== targetPeerId) {
+        await patchParticipantState(context.env, code, prevEmitter, { isEmitter: false, screenSharing: false });
+      }
+      if (targetPeerId) {
+        const target = active.find((p) => p.peerId === targetPeerId);
+        if (target) {
+          state.meta.emitterPeerId = targetPeerId;
+          state.meta.broadcast = {
+            ...idleBroadcast(),
+            emitterPeerId: targetPeerId,
+            emitterName: target.name,
+            status: 'preparing',
+            sourceType: 'screen',
+          };
+          await patchParticipantState(context.env, code, targetPeerId, {
+            isEmitter: true,
+            screenSharing: true,
+            camOn: false,
+          });
+        }
+      } else {
+        state.meta.emitterPeerId = null;
+        state.meta.broadcast = idleBroadcast();
+      }
       await saveRoomMetaAndLists(context.env, code, state.meta);
     } else if (hostAct === 'admit' && targetPeerId) {
       const waitGuest = waiting.find((w) => w.peerId === targetPeerId);
@@ -556,8 +617,10 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
               name: waitGuest.name,
               initial: waitGuest.initial,
               role: 'guest',
-              micOn: waitGuest.micOn ?? true,
-              camOn: waitGuest.camOn ?? true,
+              micOn: false,
+              micLocked: true,
+              camOn: Boolean(waitGuest.camOn),
+              isEmitter: false,
               handRaised: false,
               screenSharing: false,
               speaking: false,
@@ -584,26 +647,24 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
           {
             reason: body.block ? 'blocked' : 'rejected',
             message: body.block
-              ? 'Esta Suite tiene el acceso restringido para tu dispositivo.'
-              : 'En este momento la Suite está ocupada. Puedes intentar más tarde.',
+              ? 'El anfitrión bloqueó el acceso a esta sala.'
+              : 'El anfitrión no aceptó tu solicitud.',
           },
           targetPeerId,
           peerId,
         );
       }
-    } else if (hostAct === 'mutePeer' && targetPeerId) {
-      await patchParticipantState(context.env, code, targetPeerId, { micOn: false });
-      await pushRoomEvent(context.env, code, 'host:mute', { byName: sender.name }, targetPeerId, peerId);
-    } else if (hostAct === 'muteAll') {
-      for (const p of active) {
-        if (p.peerId !== peerId) {
-          await patchParticipantState(context.env, code, p.peerId, { micOn: false });
-          await pushRoomEvent(context.env, code, 'host:mute', { byName: sender.name }, p.peerId, peerId);
-        }
-      }
+    } else if (hostAct === 'mutePeer' || hostAct === 'muteAll') {
+      // Microphones are permanently locked at room level
+      return jsonResponse({ ok: true, meta: state.meta });
     } else if (hostAct === 'kick' && targetPeerId) {
       const target = active.find((p) => p.peerId === targetPeerId);
       if (target && target.peerId !== peerId) {
+        if (state.meta.emitterPeerId === targetPeerId) {
+          state.meta.emitterPeerId = null;
+          state.meta.broadcast = idleBroadcast();
+          await saveRoomMetaAndLists(context.env, code, state.meta);
+        }
         if (body.block && !state.blockedClientIds.includes(target.clientId)) {
           state.blockedClientIds.push(target.clientId);
           await saveRoomMetaAndLists(context.env, code, state.meta, {
@@ -618,8 +679,8 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
           {
             reason: body.block ? 'blocked' : 'kicked',
             message: body.block
-              ? 'Tu acceso a esta Suite fue cerrado.'
-              : 'Saliste de esta Suite.',
+              ? 'Fuiste bloqueado de esta sala por el anfitrión.'
+              : 'El anfitrión te quitó de esta sala.',
           },
           targetPeerId,
           peerId,
@@ -630,10 +691,12 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
         context.env,
         code,
         'room:rejected',
-        { reason: 'ended', message: 'La Suite cerró por hoy.' },
+        { reason: 'ended', message: 'El anfitrión cerró la sala.' },
         null,
         peerId,
       );
+      state.meta.emitterPeerId = null;
+      state.meta.broadcast = idleBroadcast();
       await saveRoomMetaAndLists(context.env, code, state.meta, { ended: true });
       for (const p of active) {
         await removeParticipant(context.env, code, p.peerId);

@@ -118,6 +118,8 @@ const DDL_STATEMENTS = [
     waiting_room INTEGER NOT NULL DEFAULT 0,
     host_id TEXT,
     spotlight_peer_id TEXT,
+    emitter_peer_id TEXT,
+    broadcast_json TEXT NOT NULL DEFAULT '{}',
     started_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     blocked_client_ids TEXT NOT NULL DEFAULT '[]',
@@ -133,11 +135,14 @@ const DDL_STATEMENTS = [
     initial TEXT NOT NULL,
     role TEXT NOT NULL,
     status TEXT NOT NULL,
-    mic_on INTEGER NOT NULL DEFAULT 1,
+    mic_on INTEGER NOT NULL DEFAULT 0,
     cam_on INTEGER NOT NULL DEFAULT 1,
+    is_emitter INTEGER NOT NULL DEFAULT 0,
     hand_raised INTEGER NOT NULL DEFAULT 0,
     screen_sharing INTEGER NOT NULL DEFAULT 0,
     speaking INTEGER NOT NULL DEFAULT 0,
+    calls_session_id TEXT,
+    cam_track_name TEXT,
     joined_at INTEGER NOT NULL,
     last_seen_at INTEGER NOT NULL,
     PRIMARY KEY (room_code, peer_id)
@@ -192,6 +197,8 @@ const SCHEMA_MIGRATIONS: Record<string, Array<[string, string]>> = {
     ['waiting_room', 'INTEGER NOT NULL DEFAULT 0'],
     ['host_id', 'TEXT'],
     ['spotlight_peer_id', 'TEXT'],
+    ['emitter_peer_id', 'TEXT'],
+    ['broadcast_json', "TEXT NOT NULL DEFAULT '{}'"],
     ['started_at', 'INTEGER NOT NULL DEFAULT 0'],
     ['updated_at', 'INTEGER NOT NULL DEFAULT 0'],
     ['blocked_client_ids', "TEXT NOT NULL DEFAULT '[]'"],
@@ -205,11 +212,14 @@ const SCHEMA_MIGRATIONS: Record<string, Array<[string, string]>> = {
     ['initial', "TEXT NOT NULL DEFAULT 'I'"],
     ['role', "TEXT NOT NULL DEFAULT 'guest'"],
     ['status', "TEXT NOT NULL DEFAULT 'active'"],
-    ['mic_on', 'INTEGER NOT NULL DEFAULT 1'],
+    ['mic_on', 'INTEGER NOT NULL DEFAULT 0'],
     ['cam_on', 'INTEGER NOT NULL DEFAULT 1'],
+    ['is_emitter', 'INTEGER NOT NULL DEFAULT 0'],
     ['hand_raised', 'INTEGER NOT NULL DEFAULT 0'],
     ['screen_sharing', 'INTEGER NOT NULL DEFAULT 0'],
     ['speaking', 'INTEGER NOT NULL DEFAULT 0'],
+    ['calls_session_id', 'TEXT'],
+    ['cam_track_name', 'TEXT'],
     ['joined_at', 'INTEGER NOT NULL DEFAULT 0'],
     ['last_seen_at', 'INTEGER NOT NULL DEFAULT 0'],
   ],
@@ -328,10 +338,51 @@ function rowToStoredUser(row: Record<string, unknown>): StoredUser {
     lastCodeSentAt: Number(row.last_code_sent_at || 0),
     suiteCode: rawCode || generateServerSuiteCode(),
     suitePass: rawPass || generateServerSuitePass(),
-    plan: String(row.plan || (role === 'admin' ? 'Acceso Total · Cuenta Principal' : 'Prueba gratis')),
+    plan: String(row.plan || (role === 'admin' ? 'Admin Pro · acceso total' : 'Prueba gratis')),
     createdAt: Number(row.created_at || 0),
     lastLoginAt: Number(row.last_login_at || 0),
   };
+}
+
+function defaultBroadcastState() {
+  return {
+    emitterPeerId: null,
+    emitterName: null,
+    status: 'idle' as const,
+    sourceType: 'none' as const,
+    mediaTitle: null,
+    callsSessionId: null,
+    videoTrackName: null,
+    audioTrackName: null,
+    updatedAt: Date.now(),
+  };
+}
+
+function parseBroadcastState(raw: unknown) {
+  const base = defaultBroadcastState();
+  if (typeof raw !== 'string' || !raw) return base;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== 'object') return base;
+    return {
+      ...base,
+      emitterPeerId: parsed.emitterPeerId ? String(parsed.emitterPeerId) : null,
+      emitterName: parsed.emitterName ? String(parsed.emitterName) : null,
+      status:
+        parsed.status === 'preparing' || parsed.status === 'live' ? parsed.status : ('idle' as const),
+      sourceType:
+        parsed.sourceType === 'screen' || parsed.sourceType === 'media'
+          ? parsed.sourceType
+          : ('none' as const),
+      mediaTitle: parsed.mediaTitle ? String(parsed.mediaTitle) : null,
+      callsSessionId: parsed.callsSessionId ? String(parsed.callsSessionId) : null,
+      videoTrackName: parsed.videoTrackName ? String(parsed.videoTrackName) : null,
+      audioTrackName: parsed.audioTrackName ? String(parsed.audioTrackName) : null,
+      updatedAt: Number(parsed.updatedAt || Date.now()),
+    };
+  } catch {
+    return base;
+  }
 }
 
 function rowToPeerInfo(row: Record<string, unknown>): PeerInfo {
@@ -341,17 +392,21 @@ function rowToPeerInfo(row: Record<string, unknown>): PeerInfo {
     name: String(row.name),
     initial: String(row.initial),
     role: row.role === 'host' ? 'host' : 'guest',
-    micOn: Number(row.mic_on) === 1,
+    micOn: false,
+    micLocked: true,
     camOn: Number(row.cam_on) === 1,
+    isEmitter: Number(row.is_emitter) === 1,
     handRaised: Number(row.hand_raised) === 1,
     screenSharing: Number(row.screen_sharing) === 1,
-    speaking: Number(row.speaking) === 1,
+    speaking: false,
+    callsSessionId: row.calls_session_id ? String(row.calls_session_id) : null,
+    camTrackName: row.cam_track_name ? String(row.cam_track_name) : null,
     joinedAt: Number(row.joined_at || 0),
   };
 }
 
 function rowToRoomMeta(row: Record<string, unknown>): RoomMeta {
-  const interactive = parseInteractiveState(row.interactive_json);
+  const broadcast = parseBroadcastState(row.broadcast_json);
   return {
     code: String(row.code),
     pass: row.pass ? String(row.pass) : undefined,
@@ -360,8 +415,9 @@ function rowToRoomMeta(row: Record<string, unknown>): RoomMeta {
     hostId: row.host_id ? String(row.host_id) : null,
     startedAt: Number(row.started_at || Date.now()),
     spotlightPeerId: row.spotlight_peer_id ? String(row.spotlight_peer_id) : null,
-    suiteProfile: interactive.suiteProfile || null,
-    interactive,
+    emitterPeerId: row.emitter_peer_id ? String(row.emitter_peer_id) : broadcast.emitterPeerId,
+    broadcast,
+    interactive: parseInteractiveState(row.interactive_json),
   };
 }
 
@@ -492,8 +548,7 @@ export async function ensureBootstrapAdmin(env: PagesEnv): Promise<void> {
   if (!rawEmail || !rawPassword || rawPassword.length < 4) return;
 
   const cleanName =
-    (typeof env.ADMIN_NAME === 'string' && env.ADMIN_NAME.trim()) ||
-    (rawEmail ? rawEmail.split('@')[0] : 'Admin');
+    (typeof env.ADMIN_NAME === 'string' && env.ADMIN_NAME.trim()) || 'Administrador';
   const existing = await findUserByEmail(env, rawEmail);
 
   if (existing) {
@@ -620,15 +675,15 @@ export async function createOrUpdatePendingUser(
         ok: false,
         status: 403,
         error: configuredKey
-          ? 'Clave de autorización incorrecta.'
-          : 'Ya existe una cuenta principal. Crea nuevas cuentas desde Panel de Control.',
+          ? 'Clave de administrador incorrecta.'
+          : 'Ya existe un administrador. Crea el nuevo admin desde Panel Admin Pro.',
       };
     }
   } else if (keyMatches) {
     assignedRole = 'admin';
   }
 
-  const assignedPlan = assignedRole === 'admin' ? 'Acceso Total · Cuenta Principal' : 'Prueba gratis';
+  const assignedPlan = assignedRole === 'admin' ? 'Admin Pro · acceso total' : 'Prueba gratis';
 
   if (db) {
     const existingRow = await db
@@ -845,7 +900,7 @@ export async function cleanupStaleParticipants(env: PagesEnv, roomCode?: string)
         .run();
 
       const roomRow = await db
-        .prepare('SELECT host_id, spotlight_peer_id FROM rooms WHERE code = ? AND ended = 0')
+        .prepare('SELECT host_id, spotlight_peer_id, emitter_peer_id FROM rooms WHERE code = ? AND ended = 0')
         .bind(roomCode)
         .first<Record<string, unknown>>();
       if (roomRow) {
@@ -858,11 +913,18 @@ export async function cleanupStaleParticipants(env: PagesEnv, roomCode?: string)
         const active = activeRows.results;
         const hostId = roomRow.host_id ? String(roomRow.host_id) : null;
         const spotlight = roomRow.spotlight_peer_id ? String(roomRow.spotlight_peer_id) : null;
+        const emitter = roomRow.emitter_peer_id ? String(roomRow.emitter_peer_id) : null;
 
         if (spotlight && !active.some((p) => String(p.peer_id) === spotlight)) {
           await db
             .prepare('UPDATE rooms SET spotlight_peer_id = NULL WHERE code = ?')
             .bind(roomCode)
+            .run();
+        }
+        if (emitter && !active.some((p) => String(p.peer_id) === emitter)) {
+          await db
+            .prepare('UPDATE rooms SET emitter_peer_id = NULL, broadcast_json = ? WHERE code = ?')
+            .bind(JSON.stringify(defaultBroadcastState()), roomCode)
             .run();
         }
         if (hostId && !active.some((p) => String(p.peer_id) === hostId)) {
@@ -908,6 +970,10 @@ export async function cleanupStaleParticipants(env: PagesEnv, roomCode?: string)
     if (room.meta.spotlightPeerId && !active.some((p) => p.info.peerId === room.meta.spotlightPeerId)) {
       room.meta.spotlightPeerId = null;
     }
+    if (room.meta.emitterPeerId && !active.some((p) => p.info.peerId === room.meta.emitterPeerId)) {
+      room.meta.emitterPeerId = null;
+      room.meta.broadcast = defaultBroadcastState();
+    }
     if (room.meta.hostId && !active.some((p) => p.info.peerId === room.meta.hostId)) {
       if (active[0]) {
         active[0].info.role = 'host';
@@ -939,16 +1005,14 @@ export async function getRoomSummary(env: PagesEnv, rawCode: string) {
         participants: 0,
         maxParticipants: MAX_ROOM_PARTICIPANTS,
         locked: false,
-        waitingRoom: true,
+        waitingRoom: false,
         hasPass: false,
-        suiteProfile: null,
       };
     }
     const cntRow = await db
       .prepare("SELECT COUNT(*) as cnt FROM room_participants WHERE room_code = ? AND status = 'active'")
       .bind(code)
       .first<{ cnt: number }>();
-    const interactive = parseInteractiveState(roomRow.interactive_json);
     return {
       code,
       exists: true,
@@ -957,7 +1021,6 @@ export async function getRoomSummary(env: PagesEnv, rawCode: string) {
       locked: Number(roomRow.locked) === 1,
       waitingRoom: Number(roomRow.waiting_room) === 1,
       hasPass: Boolean(roomRow.pass),
-      suiteProfile: interactive.suiteProfile || null,
     };
   }
 
@@ -969,9 +1032,8 @@ export async function getRoomSummary(env: PagesEnv, rawCode: string) {
       participants: 0,
       maxParticipants: MAX_ROOM_PARTICIPANTS,
       locked: false,
-      waitingRoom: true,
+      waitingRoom: false,
       hasPass: false,
-      suiteProfile: null,
     };
   }
   const activeCount = Array.from(room.participants.values()).filter((p) => p.status === 'active').length;
@@ -983,7 +1045,6 @@ export async function getRoomSummary(env: PagesEnv, rawCode: string) {
     locked: room.meta.locked,
     waitingRoom: room.meta.waitingRoom,
     hasPass: Boolean(room.meta.pass),
-    suiteProfile: room.meta.suiteProfile || room.meta.interactive?.suiteProfile || null,
   };
 }
 
@@ -1040,8 +1101,8 @@ export async function pushRoomEvent(
     payload,
     createdAt: now,
   });
-  if (mem.events.length > 500) {
-    mem.events.splice(0, mem.events.length - 500);
+  if (mem.events.length > 2000) {
+    mem.events.splice(0, mem.events.length - 2000);
   }
   return id;
 }
@@ -1069,16 +1130,19 @@ export async function getOrCreateRoomState(
       .first<Record<string, unknown>>();
 
     if (!existing || (resetIfEnded && Number(existing.ended) === 1)) {
+      const freshBroadcast = defaultBroadcastState();
       await db
         .prepare(
-          `INSERT INTO rooms (code, pass, locked, waiting_room, host_id, spotlight_peer_id, started_at, updated_at, blocked_client_ids, admitted_client_ids, interactive_json, ended)
-           VALUES (?, ?, 0, 1, NULL, NULL, ?, ?, '[]', '[]', '{}', 0)
+          `INSERT INTO rooms (code, pass, locked, waiting_room, host_id, spotlight_peer_id, emitter_peer_id, broadcast_json, started_at, updated_at, blocked_client_ids, admitted_client_ids, interactive_json, ended)
+           VALUES (?, ?, 0, 0, NULL, NULL, NULL, ?, ?, ?, '[]', '[]', '{}', 0)
            ON CONFLICT(code) DO UPDATE SET
              pass = COALESCE(excluded.pass, rooms.pass),
              locked = 0,
-             waiting_room = 1,
+             waiting_room = 0,
              host_id = NULL,
              spotlight_peer_id = NULL,
+             emitter_peer_id = NULL,
+             broadcast_json = excluded.broadcast_json,
              started_at = excluded.started_at,
              updated_at = excluded.updated_at,
              blocked_client_ids = '[]',
@@ -1086,7 +1150,7 @@ export async function getOrCreateRoomState(
              interactive_json = '{}',
              ended = 0`,
         )
-        .bind(code, cleanPass, now, now)
+        .bind(code, cleanPass, JSON.stringify(freshBroadcast), now, now)
         .run();
 
       if (resetIfEnded) {
@@ -1099,11 +1163,12 @@ export async function getOrCreateRoomState(
           code,
           pass: cleanPass || undefined,
           locked: false,
-          waitingRoom: true,
+          waitingRoom: false,
           hostId: null,
           startedAt: now,
           spotlightPeerId: null,
-          suiteProfile: null,
+          emitterPeerId: null,
+          broadcast: freshBroadcast,
           interactive: {},
         },
         blockedClientIds: [],
@@ -1128,11 +1193,12 @@ export async function getOrCreateRoomState(
         code,
         pass: cleanPass || undefined,
         locked: false,
-        waitingRoom: true,
+        waitingRoom: false,
         hostId: null,
         startedAt: now,
         spotlightPeerId: null,
-        suiteProfile: null,
+        emitterPeerId: null,
+        broadcast: defaultBroadcastState(),
         interactive: {},
       },
       updatedAt: now,
@@ -1173,8 +1239,6 @@ export async function getRoomParticipants(
           clientId: String(r.client_id),
           name: String(r.name),
           initial: String(r.initial),
-          micOn: Number(r.mic_on) === 1,
-          camOn: Number(r.cam_on) === 1,
           requestedAt: Number(r.joined_at || Date.now()),
         });
       } else {
@@ -1195,8 +1259,6 @@ export async function getRoomParticipants(
         clientId: entry.info.clientId,
         name: entry.info.name,
         initial: entry.info.initial,
-        micOn: entry.info.micOn,
-        camOn: entry.info.camOn,
         requestedAt: entry.info.joinedAt,
       });
     } else {
@@ -1220,7 +1282,7 @@ export async function saveRoomMetaAndLists(
       .prepare(
         `UPDATE rooms
          SET pass = ?, locked = ?, waiting_room = ?, host_id = ?, spotlight_peer_id = ?,
-             interactive_json = ?, updated_at = ?
+             emitter_peer_id = ?, broadcast_json = ?, interactive_json = ?, updated_at = ?
          WHERE code = ?`,
       )
       .bind(
@@ -1229,6 +1291,8 @@ export async function saveRoomMetaAndLists(
         meta.waitingRoom ? 1 : 0,
         meta.hostId ?? null,
         meta.spotlightPeerId ?? null,
+        meta.emitterPeerId ?? null,
+        JSON.stringify(meta.broadcast || defaultBroadcastState()),
         JSON.stringify(meta.interactive || {}),
         now,
         code,
@@ -1279,19 +1343,23 @@ export async function upsertRoomParticipant(
       .prepare(
         `INSERT INTO room_participants (
           room_code, peer_id, client_id, name, initial, role, status,
-          mic_on, cam_on, hand_raised, screen_sharing, speaking, joined_at, last_seen_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          mic_on, cam_on, is_emitter, hand_raised, screen_sharing, speaking,
+          calls_session_id, cam_track_name, joined_at, last_seen_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(room_code, peer_id) DO UPDATE SET
           client_id = excluded.client_id,
           name = excluded.name,
           initial = excluded.initial,
           role = excluded.role,
           status = excluded.status,
-          mic_on = excluded.mic_on,
+          mic_on = 0,
           cam_on = excluded.cam_on,
+          is_emitter = excluded.is_emitter,
           hand_raised = excluded.hand_raised,
           screen_sharing = excluded.screen_sharing,
-          speaking = excluded.speaking,
+          speaking = 0,
+          calls_session_id = excluded.calls_session_id,
+          cam_track_name = excluded.cam_track_name,
           last_seen_at = excluded.last_seen_at`,
       )
       .bind(
@@ -1302,11 +1370,14 @@ export async function upsertRoomParticipant(
         info.initial,
         info.role,
         status,
-        info.micOn ? 1 : 0,
+        0,
         info.camOn ? 1 : 0,
+        info.isEmitter ? 1 : 0,
         info.handRaised ? 1 : 0,
         info.screenSharing ? 1 : 0,
-        info.speaking ? 1 : 0,
+        0,
+        info.callsSessionId ?? null,
+        info.camTrackName ?? null,
         info.joinedAt,
         now,
       )
@@ -1316,7 +1387,11 @@ export async function upsertRoomParticipant(
 
   const room = getMem().rooms.get(roomCode);
   if (room) {
-    room.participants.set(info.peerId, { info: { ...info }, status, lastSeenAt: now });
+    room.participants.set(info.peerId, {
+      info: { ...info, micOn: false, micLocked: true, speaking: false },
+      status,
+      lastSeenAt: now,
+    });
     room.updatedAt = now;
   }
 }
@@ -1358,21 +1433,22 @@ export async function patchParticipantState(
     await db
       .prepare(
         `UPDATE room_participants
-         SET name = ?, initial = ?, role = ?, mic_on = ?, cam_on = ?, hand_raised = ?,
-             screen_sharing = ?, speaking = ?, last_seen_at = ?
+         SET name = ?, initial = ?, role = ?, mic_on = 0, cam_on = ?, is_emitter = ?, hand_raised = ?,
+             screen_sharing = ?, speaking = 0, calls_session_id = ?, cam_track_name = ?, last_seen_at = ?
          WHERE room_code = ? AND peer_id = ?`,
       )
       .bind(
         nextName,
         getInitial(nextName),
         patch.role || current.role,
-        (typeof patch.micOn === 'boolean' ? patch.micOn : current.micOn) ? 1 : 0,
         (typeof patch.camOn === 'boolean' ? patch.camOn : current.camOn) ? 1 : 0,
+        (typeof patch.isEmitter === 'boolean' ? patch.isEmitter : current.isEmitter) ? 1 : 0,
         (typeof patch.handRaised === 'boolean' ? patch.handRaised : current.handRaised) ? 1 : 0,
         (typeof patch.screenSharing === 'boolean' ? patch.screenSharing : current.screenSharing)
           ? 1
           : 0,
-        (typeof patch.speaking === 'boolean' ? patch.speaking : current.speaking) ? 1 : 0,
+        patch.callsSessionId !== undefined ? patch.callsSessionId : (current.callsSessionId ?? null),
+        patch.camTrackName !== undefined ? patch.camTrackName : (current.camTrackName ?? null),
         now,
         roomCode,
         peerId,
@@ -1384,7 +1460,7 @@ export async function patchParticipantState(
   const room = getMem().rooms.get(roomCode);
   const entry = room?.participants.get(peerId);
   if (!entry) return;
-  Object.assign(entry.info, patch);
+  Object.assign(entry.info, patch, { micOn: false, micLocked: true, speaking: false });
   if (patch.name) {
     entry.info.name = patch.name.trim().slice(0, 32);
     entry.info.initial = getInitial(entry.info.name);
@@ -1511,26 +1587,36 @@ export async function getRoomEventsAfter(
         createdAt: Number(r.created_at),
       };
     });
-    const maxRow = await db
-      .prepare('SELECT COALESCE(MAX(id), 0) as max_id FROM room_events WHERE room_code = ?')
-      .bind(roomCode)
-      .first<{ max_id: number }>();
-    const lastEventId = Math.max(afterEventId, Number(maxRow?.max_id || 0));
+    const hitLimit = rows.results.length >= 100 && events.length > 0;
+    let lastEventId = afterEventId;
+    if (hitLimit) {
+      lastEventId = events[events.length - 1].id;
+    } else {
+      const maxRow = await db
+        .prepare('SELECT COALESCE(MAX(id), 0) as max_id FROM room_events WHERE room_code = ?')
+        .bind(roomCode)
+        .first<{ max_id: number }>();
+      lastEventId = Math.max(afterEventId, Number(maxRow?.max_id || 0));
+    }
     return { events, lastEventId };
   }
 
   const mem = getMem();
-  const events = mem.events.filter(
+  const matching = mem.events.filter(
     (e) =>
       e.roomCode === roomCode &&
       e.id > afterEventId &&
       (!e.targetPeerId || e.targetPeerId === peerId) &&
       e.fromPeerId !== peerId,
   );
-  const maxId = mem.events.reduce(
-    (acc, e) => (e.roomCode === roomCode && e.id > acc ? e.id : acc),
-    afterEventId,
-  );
+  const events = matching.slice(0, 100);
+  const hitLimit = matching.length > 100 && events.length > 0;
+  const maxId = hitLimit
+    ? events[events.length - 1].id
+    : mem.events.reduce(
+        (acc, e) => (e.roomCode === roomCode && e.id > acc ? e.id : acc),
+        afterEventId,
+      );
   return { events, lastEventId: maxId };
 }
 
@@ -1590,7 +1676,7 @@ export async function getAdminSnapshot(env: PagesEnv) {
         hasPass: Boolean(r.pass),
         startedAt: Number(r.started_at || Date.now()),
         messagesCount: msgCounts.get(code) || 0,
-        hostName: host ? String(host.name) : 'Sin creador',
+        hostName: host ? String(host.name) : 'Sin anfitrión',
       });
     }
 
@@ -1654,7 +1740,7 @@ export async function getAdminSnapshot(env: PagesEnv) {
       hasPass: Boolean(room.meta.pass),
       startedAt: room.meta.startedAt,
       messagesCount: room.messages.length,
-      hostName: hostPeer?.name || 'Sin creador',
+      hostName: hostPeer?.name || 'Sin anfitrión',
     });
   }
 
@@ -1728,7 +1814,7 @@ export async function adminMutateRoom(
         env,
         code,
         'host:mute',
-        { byName: `Control (${adminName})` },
+        { byName: `Admin (${adminName})` },
         p.peerId,
         null,
       );
@@ -1742,7 +1828,7 @@ export async function adminMutateRoom(
       env,
       code,
       'room:rejected',
-      { reason: 'ended', message: 'La sala fue cerrada desde Panel de Control.' },
+      { reason: 'ended', message: 'La sala fue cerrada por el administrador.' },
       null,
       null,
     );
@@ -1759,4 +1845,3 @@ export async function adminMutateRoom(
 
   return { ok: false, status: 400, error: 'Acción no válida.' };
 }
-

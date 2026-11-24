@@ -1,7 +1,9 @@
 import {
   esc,
+  formatDuration,
   getPeerTint,
   iconBell,
+  iconBroadcastPro,
   iconCam,
   iconChart,
   iconChat,
@@ -12,9 +14,14 @@ import {
   iconHeartbeat,
   iconLeave,
   iconLock,
+  iconLoop,
   iconMic,
   iconMuteAll,
+  iconNext,
+  iconPause,
   iconPip,
+  iconPlay,
+  iconPrev,
   iconReaction,
   iconSend,
   iconSettings,
@@ -27,11 +34,13 @@ import {
   iconSwap,
   iconUserPlus,
   iconUsers,
+  iconVolume,
   iconWave,
   playSpatialHeartbeatSound,
   renderLinkedTextHtml,
 } from './icons.js';
 import {
+  ACCENT_TOKENS,
   DIGITAL_PERKS,
   addLatidos,
   deductLatidos,
@@ -60,13 +69,13 @@ export function renderShareSheetHtml(opts) {
         ${iconClose()}
       </button>
       <h2 id="sh">${isApp ? 'Compartir spaceSUITE' : 'Invitar a tu SUITE'}</h2>
-      <p id="sp">${isApp ? 'Manda el enlace de la app a quien quieras.' : 'Quien llegue verá SPACE y decidirá si quiere entrar.'}</p>
+      <p id="sp">${isApp ? 'Manda el enlace de la app a quien quieras.' : 'Cada persona espera tu aprobación para entrar.'}</p>
       <div id="sf">
         ${
           isApp
             ? `<div class="kv"><span>Enlace</span><b>${esc(hostDisplay)}</b></div>`
             : `<div class="kv"><span>Código de SUITE</span><b>${esc(opts.code)}</b></div>
-               ${opts.pass ? `<div class="kv"><span>Clave</span><b>${esc(opts.pass)}</b></div>` : ''}`
+               <div class="kv"><span>Clave</span><b>${esc(opts.pass || 'Libre')}</b></div>`
         }
         <div class="shr">
           ${SHARE_TARGETS.map(
@@ -79,11 +88,11 @@ export function renderShareSheetHtml(opts) {
         </div>
         <div class="row2">
           <button type="button" data-act="copy-link">Copiar enlace</button>
-          ${!isApp ? `<button type="button" data-act="copy-cred">Copiar código</button>` : ''}
+          ${!isApp ? `<button type="button" data-act="copy-cred">Copiar código y clave</button>` : ''}
         </div>
         ${
           !isApp
-            ? `<p>El enlace abre SPACE directamente. También puedes compartir solo el código de 6 caracteres.</p>
+            ? `<p>El enlace entra directo con la clave. Si prefieres, comparte solo el código y la clave por separado.</p>
                <div class="row2">
                  ${opts.hasSwitchApp ? `<button type="button" data-act="switch-app">Compartir la app</button>` : ''}
                  ${opts.hasOpenInstall ? `<button type="button" data-act="open-install">Instalar la app</button>` : ''}
@@ -100,7 +109,7 @@ export function bindShareSheetEvents(container, opts) {
   const buildMsg = () =>
     isApp
       ? `Instala spaceSUITE: videollamadas privadas\n${opts.link}`
-      : `Te invito a mi Suite en spaceSUITE\nCódigo: ${opts.code}\nEntra directo: ${opts.link}`;
+      : `Te invito a mi SUITE en spaceSUITE\nCódigo: ${opts.code}\nClave: ${opts.pass || '—'}\nEntra directo: ${opts.link}`;
 
   const copyText = async (text) => {
     try {
@@ -222,7 +231,7 @@ export class AdminPanelController {
 
   async fetchMetrics() {
     if (!this.user?.token) {
-      this.error = 'Sesión sin token de acceso principal.';
+      this.error = 'Sesión sin token de administrador.';
       this.loading = false;
       this._renderContent();
       return;
@@ -335,7 +344,7 @@ export class AdminPanelController {
       if (!res.ok) {
         this.onToast(json.error || 'No se pudo crear la cuenta');
       } else {
-        this.onToast(`Cuenta ${role === 'admin' ? 'Principal' : 'Estándar'} creada`);
+        this.onToast(`Cuenta ${role === 'admin' ? 'Admin' : 'Usuario'} creada`);
         this.createForm = { name: '', email: '', password: '', role: 'admin' };
         this.createOpen = false;
         await this.fetchMetrics();
@@ -352,7 +361,7 @@ export class AdminPanelController {
     this.mountEl.innerHTML = `
       <section class="sheet admin-sheet" role="dialog" aria-modal="true" aria-labelledby="sh">
         <button type="button" class="orb sm x" data-adm="close" aria-label="Cerrar">${iconClose()}</button>
-        <h2 id="sh">Panel de Control</h2>
+        <h2 id="sh">Panel Admin Pro</h2>
         <p id="sp">Métricas en vivo · Cloudflare Pages Edge</p>
         <div id="admin-kpis"></div>
         <div class="admin-tabs" role="tablist" id="admin-tabs"></div>
@@ -407,13 +416,13 @@ export class AdminPanelController {
                 <div class="admin-card-head">
                   <div>
                     <b>${esc(r.code)}</b>
-                    <small>Creador: ${esc(r.hostName)} · ${r.participants} en línea${r.waiting > 0 ? ` · ${r.waiting} en espera` : ''} · ${r.messagesCount} msg</small>
+                    <small>Anfitrión: ${esc(r.hostName)} · ${r.participants} en línea${r.waiting > 0 ? ` · ${r.waiting} en espera` : ''} · ${r.messagesCount} msg</small>
                   </div>
                   <span class="admin-badge ${r.locked ? 'warn' : 'ok'}">${r.locked ? 'Bloqueada' : 'Abierta'}</span>
                 </div>
                 <div class="admin-actions">
-                  <button type="button" class="orb sm ${r.locked ? 'is-active' : ''}" ${dis} data-room-act="lock" data-code="${esc(r.code)}" data-val="${!r.locked}" title="${r.locked ? 'Abrir sala' : 'Bloquear sala'}">${iconLock(!r.locked)}</button>
-                  <button type="button" class="orb sm ${r.waitingRoom ? 'is-active' : ''}" ${dis} data-room-act="waitingRoom" data-code="${esc(r.code)}" data-val="${!r.waitingRoom}" title="Alternar recibidor SPACE">${iconShield()}</button>
+                  <button type="button" class="orb sm ${r.locked ? 'active-mint' : ''}" ${dis} data-room-act="lock" data-code="${esc(r.code)}" data-val="${!r.locked}" title="${r.locked ? 'Abrir sala' : 'Bloquear sala'}">${iconLock(!r.locked)}</button>
+                  <button type="button" class="orb sm ${r.waitingRoom ? 'active-mint' : ''}" ${dis} data-room-act="waitingRoom" data-code="${esc(r.code)}" data-val="${!r.waitingRoom}" title="Alternar sala de espera">${iconShield()}</button>
                   <button type="button" class="orb sm" ${dis} data-room-act="muteAll" data-code="${esc(r.code)}" title="Silenciar sala">${iconMuteAll()}</button>
                   <button type="button" class="orb sm rm" ${dis} data-room-act="endRoom" data-code="${esc(r.code)}" title="Cerrar sala">${iconLeave()}</button>
                 </div>
@@ -428,15 +437,15 @@ export class AdminPanelController {
             <input type="email" maxlength="120" placeholder="Correo electrónico" data-adm-field="email" value="${esc(cf.email)}" />
             <input type="text" maxlength="200" placeholder="Contraseña (8+, letras y números)" data-adm-field="password" value="${esc(cf.password)}" />
             <select data-adm-field="role">
-              <option value="admin" ${cf.role === 'admin' ? 'selected' : ''}>Acceso Principal (Control total)</option>
-              <option value="user" ${cf.role === 'user' ? 'selected' : ''}>Acceso Estándar</option>
+              <option value="admin" ${cf.role === 'admin' ? 'selected' : ''}>Rol: Administrador</option>
+              <option value="user" ${cf.role === 'user' ? 'selected' : ''}>Rol: Usuario estándar</option>
             </select>
             <div class="adm-create-acts">
               <button type="submit" class="tr-b" style="min-height:38px" ${dis}>Crear cuenta</button>
               <button type="button" class="tr-g" style="min-height:38px" data-adm="cancel-create">Cancelar</button>
             </div>
           </form>`
-        : `<button type="button" class="adm-create-toggle" data-adm="open-create">${iconUserPlus()}<span>Crear cuenta o acceso principal</span></button>`;
+        : `<button type="button" class="adm-create-toggle" data-adm="open-create">${iconUserPlus()}<span>Crear usuario o administrador</span></button>`;
 
       bodyEl.innerHTML =
         createHtml +
@@ -447,11 +456,11 @@ export class AdminPanelController {
               <div class="row">
                 <i class="av">${esc((u.name || 'U').charAt(0).toUpperCase())}</i>
                 <span>
-                  <b>${esc(u.name)} <span class="admin-badge ${u.role === 'admin' ? 'ok' : ''}">${u.role === 'admin' ? 'Principal' : 'Usuario'}</span></b>
+                  <b>${esc(u.name)} <span class="admin-badge ${u.role === 'admin' ? 'ok' : ''}">${u.role === 'admin' ? 'Admin' : 'Usuario'}</span></b>
                   <small>${esc(u.email)} · ${u.verified ? 'Verificado' : 'Pendiente'} · ${esc(u.suiteCode)}</small>
                 </span>
                 ${!u.verified ? `<button type="button" class="orb sm" ${dis} data-user-verify="${esc(u.email)}" title="Verificar manualmente">${iconCheck()}</button>` : ''}
-                ${!isSelf ? `<button type="button" class="orb sm ${u.role === 'admin' ? 'is-active' : ''}" ${dis} data-user-role="${esc(u.email)}" data-next-role="${u.role === 'admin' ? 'user' : 'admin'}" title="${u.role === 'admin' ? 'Cambiar a estándar' : 'Dar acceso principal'}">${iconUsers()}</button>` : ''}
+                ${!isSelf ? `<button type="button" class="orb sm ${u.role === 'admin' ? 'active-mint' : ''}" ${dis} data-user-role="${esc(u.email)}" data-next-role="${u.role === 'admin' ? 'user' : 'admin'}" title="${u.role === 'admin' ? 'Cambiar a usuario' : 'Promover a admin'}">${iconUsers()}</button>` : ''}
               </div>`;
           })
           .join('');
@@ -543,8 +552,9 @@ function formatMessageTime(ts) {
 }
 
 export class ChatHudController {
-  constructor(mountEl, { onSend, onTyping, onClose, onChangeTarget, onUpdateSettings, onPeerDepartedFallback }) {
+  constructor(mountEl, { embedded = false, onSend, onTyping, onClose, onChangeTarget, onUpdateSettings, onPeerDepartedFallback }) {
     this.mountEl = mountEl;
+    this.embedded = Boolean(embedded);
     this.onSend = onSend;
     this.onTyping = onTyping;
     this.onClose = onClose;
@@ -552,13 +562,13 @@ export class ChatHudController {
     this.onUpdateSettings = onUpdateSettings;
     this.onPeerDepartedFallback = onPeerDepartedFallback;
 
-    this.open = false;
+    this.open = this.embedded;
     this.selfPeerId = null;
     this.peers = [];
     this.messages = [];
     this.typingPeers = [];
     this.chatTarget = null;
-    this.settings = { opacity: 85, fontSize: 'md', soundEnabled: true, toastEnabled: true, accent: 'obsidian' };
+    this.settings = { opacity: 45, fontSize: 'md', soundEnabled: true, toastEnabled: true, accent: 'emerald' };
 
     this.settingsOpen = false;
     this.tabUnread = {};
@@ -585,11 +595,12 @@ export class ChatHudController {
 
   _buildDom() {
     this.mountEl.innerHTML = `
-      <div id="chatp" class="chat-hud" hidden>
+      <div id="chatp" class="chat-hud ${this.embedded ? 'is-embedded' : ''}" ${this.embedded ? '' : 'hidden'}>
         <div class="chat-hud-head">
           <div id="ctabs"></div>
           <div class="chat-head-acts">
             <button type="button" class="orb sm chat-icon-btn" id="chat-cfg-btn" aria-label="Ajustes del chat" title="Ajustes del chat">${iconSettings()}</button>
+            <button type="button" class="orb sm chat-icon-btn" id="chat-cls-btn" aria-label="Cerrar chat" ${this.embedded ? 'hidden' : ''}>${iconClose()}</button>
           </div>
         </div>
         <div id="chat-settings-box" class="chat-settings" role="region" aria-label="Ajustes del chat" hidden></div>
@@ -611,6 +622,7 @@ export class ChatHudController {
     this.hudEl = this.mountEl.querySelector('#chatp');
     this.tabsEl = this.mountEl.querySelector('#ctabs');
     this.cfgBtn = this.mountEl.querySelector('#chat-cfg-btn');
+    this.clsBtn = this.mountEl.querySelector('#chat-cls-btn');
     this.settingsBox = this.mountEl.querySelector('#chat-settings-box');
     this.bodyBox = this.mountEl.querySelector('#chat-body-box');
     this.msgsEl = this.mountEl.querySelector('#msgs');
@@ -620,6 +632,7 @@ export class ChatHudController {
     this.formEl = this.mountEl.querySelector('#cb');
     this.inputEl = this.mountEl.querySelector('#ci');
 
+    this.clsBtn.addEventListener('click', () => this.onClose());
     this.cfgBtn.addEventListener('click', () => {
       this.settingsOpen = !this.settingsOpen;
       this._renderSettingsBox();
@@ -675,12 +688,6 @@ export class ChatHudController {
       this.onSend(trimmed, this.chatTarget);
       this.onTyping(false, this.chatTarget);
       this.inputEl.value = '';
-      this.isNearBottom = true;
-      this.showNewBelow = false;
-      this.jumpBtn.hidden = true;
-      requestAnimationFrame(() => {
-        this.msgsEl.scrollTo({ top: this.msgsEl.scrollHeight, behavior: 'smooth' });
-      });
     });
 
     this.settingsBox.addEventListener('input', (e) => {
@@ -701,30 +708,38 @@ export class ChatHudController {
       const fsBtn = e.target.closest('[data-cs-fs]');
       if (fsBtn) {
         this.onUpdateSettings({ ...this.settings, fontSize: fsBtn.getAttribute('data-cs-fs') });
+        return;
+      }
+      const acBtn = e.target.closest('[data-cs-acc]');
+      if (acBtn) {
+        this.onUpdateSettings({ ...this.settings, accent: acBtn.getAttribute('data-cs-acc') });
       }
     });
   }
 
   _applyHudStyle() {
-    const alpha = Math.max(0.84, this.settings.opacity / 100).toFixed(2);
+    const accent = ACCENT_TOKENS[this.settings.accent] || ACCENT_TOKENS.emerald;
+    const alpha = (this.settings.opacity / 100).toFixed(2);
     const fontSizeCss =
-      this.settings.fontSize === 'sm' ? '0.84rem' : this.settings.fontSize === 'lg' ? '1.08rem' : '0.94rem';
+      this.settings.fontSize === 'sm' ? '0.82rem' : this.settings.fontSize === 'lg' ? '1.08rem' : '0.94rem';
 
-    this.hudEl.style.background = `rgba(11, 22, 46, ${alpha})`;
-    if (this.kbInset > 0) {
-      this.hudEl.style.top = 'auto';
-      this.hudEl.style.bottom = `${this.kbInset + 6}px`;
-      this.hudEl.style.maxHeight = this.vvHeight ? `${Math.max(180, this.vvHeight - 76)}px` : '58dvh';
+    this.hudEl.style.background = this.embedded ? '' : `rgba(10, 15, 20, ${alpha})`;
+    if (!this.embedded) {
+      this.hudEl.style.bottom = this.kbInset > 0 ? `${this.kbInset + 10}px` : '';
+      this.hudEl.style.maxHeight = this.vvHeight
+        ? `${Math.max(200, Math.min(this.vvHeight * 0.54, 420))}px`
+        : '';
     } else {
-      this.hudEl.style.top = '';
       this.hudEl.style.bottom = '';
       this.hudEl.style.maxHeight = '';
     }
+    this.hudEl.style.setProperty('--chat-bubble-bg', accent.bg);
+    this.hudEl.style.setProperty('--chat-bubble-border', accent.border);
     this.hudEl.style.setProperty('--chat-msg-size', fontSizeCss);
   }
 
   _renderSettingsBox() {
-    this.cfgBtn.classList.toggle('is-active', this.settingsOpen);
+    this.cfgBtn.classList.toggle('active-mint', this.settingsOpen);
     this.settingsBox.hidden = !this.settingsOpen;
     this.bodyBox.style.display = this.settingsOpen ? 'none' : 'flex';
     if (!this.settingsOpen) return;
@@ -732,7 +747,7 @@ export class ChatHudController {
     this.settingsBox.innerHTML = `
       <div class="cs-row">
         <div class="cs-label"><b>Transparencia</b><span>${this.settings.opacity}%</span></div>
-        <input type="range" min="40" max="96" step="4" value="${this.settings.opacity}" class="cs-slider" data-cs-opacity aria-label="Transparencia del fondo" />
+        <input type="range" min="20" max="85" step="5" value="${this.settings.opacity}" class="cs-slider" data-cs-opacity aria-label="Transparencia del fondo" />
       </div>
       <div class="cs-row">
         <div class="cs-label"><b>Tamaño de texto</b></div>
@@ -746,6 +761,17 @@ export class ChatHudController {
               ([k, lbl]) =>
                 `<button type="button" class="${this.settings.fontSize === k ? 'on' : ''}" data-cs-fs="${k}">${lbl}</button>`,
             )
+            .join('')}
+        </div>
+      </div>
+      <div class="cs-row">
+        <div class="cs-label"><b>Color de tus burbujas</b></div>
+        <div class="cs-accents">
+          ${Object.keys(ACCENT_TOKENS)
+            .map((k) => {
+              const tok = ACCENT_TOKENS[k];
+              return `<button type="button" class="cs-swatch ${this.settings.accent === k ? 'on' : ''}" data-cs-acc="${k}"><i style="background:${tok.swatch}"></i><span>${tok.label}</span></button>`;
+            })
             .join('')}
         </div>
       </div>
@@ -763,8 +789,9 @@ export class ChatHudController {
   }
 
   update({ open, selfPeerId, peers, messages, typingPeers, chatTarget, settings }) {
+    const effectiveOpen = this.embedded ? true : Boolean(open);
     const prevOpen = this.open;
-    this.open = open;
+    this.open = effectiveOpen;
     this.selfPeerId = selfPeerId;
     this.peers = peers || [];
     this.messages = messages || [];
@@ -772,10 +799,10 @@ export class ChatHudController {
     this.chatTarget = chatTarget || null;
     this.settings = settings;
 
-    if (prevOpen !== open) {
+    if (prevOpen !== effectiveOpen) {
       const vv = window.visualViewport;
-      if (open) {
-        if (vv) {
+      if (effectiveOpen) {
+        if (vv && !this.embedded) {
           this._syncViewport();
           vv.addEventListener('resize', this._syncViewport);
           vv.addEventListener('scroll', this._syncViewport);
@@ -794,7 +821,7 @@ export class ChatHudController {
       }
     }
 
-    this.hudEl.hidden = !open;
+    this.hudEl.hidden = !effectiveOpen;
     this._applyHudStyle();
 
     const remotePeers = this.peers.filter((p) => p.peerId !== this.selfPeerId);
@@ -886,20 +913,9 @@ export class ChatHudController {
         this.msgsEl.innerHTML = visibleMessages
           .map((m) => {
             const isSelf = m.fromPeerId === this.selfPeerId;
-            const timeStr = formatMessageTime(m.timestamp);
-            const statusHtml = isSelf
-              ? `<span class="msg-status-badge">✓ ${esc(m.status || 'Enviado')}</span>`
-              : '';
-            return `
-              <div class="msg ${isSelf ? 'me' : ''}">
-                <small>
-                  <span class="msg-sender-name">${isSelf ? 'Tú' : esc(m.fromName)}</span>
-                  <span class="msg-time">${esc(timeStr)}</span>
-                  ${statusHtml}
-                </small>
-                <span>${renderLinkedTextHtml(m.text)}</span>
-              </div>
-            `;
+            return `<div class="msg ${isSelf ? 'me' : ''}"><small>${
+              isSelf ? 'Tú' : esc(m.fromName)
+            } · ${esc(formatMessageTime(m.timestamp))}</small><span>${renderLinkedTextHtml(m.text)}</span></div>`;
           })
           .join('');
       }
@@ -952,14 +968,166 @@ export class ChatHudController {
 }
 
 export function renderRoomSheetHtml(sheet, ctx) {
-  if (sheet === 'people') {
-    const { peers, self, roomCapacity, isRoomFull, orderedPeers, kickArmedId } = ctx;
+  if (sheet === 'broadcast') {
+    const { self, meta, broadcastSnapshot, streamActive } = ctx;
+    const emitterId = meta?.emitterPeerId || null;
+    const isSelfEmitter = Boolean(emitterId && emitterId === self?.peerId);
+    const occupiedByOther = Boolean(emitterId && !isSelfEmitter);
     const isHost = self?.role === 'host';
+    const bStatus = meta?.broadcast?.status || 'idle';
+    const bSource = meta?.broadcast?.sourceType || 'none';
+    const bc = broadcastSnapshot || {
+      items: [],
+      activeIndex: -1,
+      activeItem: null,
+      playing: false,
+      loop: true,
+      volume: 0.85,
+      currentTime: 0,
+      duration: 0,
+    };
+    const items = Array.isArray(bc.items) ? bc.items : [];
+    const activeItem = bc.activeItem || null;
+    const canDisplay = typeof navigator !== 'undefined' && Boolean(navigator.mediaDevices?.getDisplayMedia);
+
+    return `
+      <section class="sheet ss-tx-sheet" role="dialog" aria-modal="true" aria-labelledby="sh">
+        <button type="button" class="orb sm x" data-act="close" aria-label="Cerrar">${iconClose()}</button>
+        <div class="ss-tx-title-row">
+          ${iconBroadcastPro(isSelfEmitter && bStatus === 'live')}
+          <div>
+            <h2 id="sh">Centro de Transmisión</h2>
+            <p id="sp" style="margin:0">${
+              occupiedByOther
+                ? `Escenario ocupado por ${esc(meta?.broadcast?.emitterName || 'otro participante')}`
+                : isSelfEmitter
+                  ? bStatus === 'preparing'
+                    ? 'Preparando transmisión privada en negro'
+                    : `Emitiendo en vivo · ${bSource === 'media' ? 'Multimedia' : 'Pantalla'}`
+                  : '1 emisor exclusivo · micrófonos bloqueados'
+            }</p>
+          </div>
+        </div>
+
+        <div id="sf">
+          ${
+            occupiedByOther
+              ? `<div class="ss-tx-lock-box">
+                  <span>Solo 1 participante puede emitir pantalla o video a la vez.</span>
+                  ${
+                    isHost
+                      ? `<button type="button" class="tr-g" data-bc="release">Retomar escenario</button>`
+                      : ''
+                  }
+                </div>`
+              : ''
+          }
+
+          <div class="ss-tx-section">
+            <div class="ss-tx-sec-head">
+              <b>a) Transmitir Pantalla / App</b>
+              <small>Pantalla negra LED hasta que la fuente esté lista (sin exponer menús)</small>
+            </div>
+            <div class="ss-tx-acts">
+              ${
+                isSelfEmitter && bSource === 'screen'
+                  ? `<button type="button" class="tr-b ss-tx-stop" data-bc="stop">Detener pantalla</button>`
+                  : `<button type="button" class="tr-b" data-bc="screen" ${
+                      occupiedByOther || !canDisplay ? 'disabled' : ''
+                    }>${canDisplay ? 'Iniciar pantalla protegida' : 'No disponible en este navegador'}</button>`
+              }
+            </div>
+          </div>
+
+          <div class="ss-tx-section">
+            <div class="ss-tx-sec-head">
+              <b>b) Multimedia Local (Videos y Fotos · 720p)</b>
+              <small>Audio sincronizado · Playlist privada guardada en tu dispositivo</small>
+            </div>
+
+            <input type="file" id="bc-file-input" multiple accept="video/*,image/*" hidden />
+            <div class="ss-tx-picker-row">
+              <button type="button" class="tr-g" data-bc="pick-files" ${occupiedByOther ? 'disabled' : ''}>Cargar videos o fotos</button>
+              ${
+                items.length > 0
+                  ? `<button type="button" class="tr-g" data-bc="clear-files" style="flex:0 0 auto;padding:10px 12px">Vaciar</button>`
+                  : ''
+              }
+            </div>
+
+            ${
+              items.length > 0
+                ? `<div class="ss-tx-playlist">
+                    ${items
+                      .map((it, idx) => {
+                        const on = idx === bc.activeIndex;
+                        return `
+                          <div class="ss-tx-item ${on ? 'on' : ''}">
+                            <button type="button" class="ss-tx-item-btn" data-bc-item="${idx}">
+                              <span>${esc(it.name)}</span>
+                              <small>${it.kind === 'image' ? 'Foto' : 'Video'}</small>
+                            </button>
+                            <button type="button" class="orb sm" data-bc-del="${esc(it.id)}" aria-label="Eliminar">${iconClose()}</button>
+                          </div>`;
+                      })
+                      .join('')}
+                  </div>`
+                : `<div class="ss-tx-empty">Carga tus videos o fotos para armar tu playlist local.</div>`
+            }
+
+            ${
+              items.length > 0
+                ? `<div class="ss-tx-controls">
+                    <div class="ss-tx-transport">
+                      <button type="button" class="orb sm" data-bc="prev" aria-label="Anterior">${iconPrev()}</button>
+                      <button type="button" class="orb sm active-mint" data-bc="toggle-play" aria-label="${bc.playing ? 'Pausar' : 'Reproducir'}">${bc.playing ? iconPause() : iconPlay()}</button>
+                      <button type="button" class="orb sm" data-bc="next" aria-label="Siguiente">${iconNext()}</button>
+                      <button type="button" class="orb sm ${bc.loop ? 'active-mint' : ''}" data-bc="toggle-loop" aria-label="Bucle">${iconLoop()}</button>
+                      <span class="ss-tx-time">${formatDuration(bc.currentTime)} / ${formatDuration(bc.duration)}</span>
+                    </div>
+
+                    ${
+                      activeItem?.kind !== 'image'
+                        ? `<input type="range" id="bc-seek" min="0" max="${Math.max(1, Math.floor(bc.duration || 1))}" value="${Math.floor(bc.currentTime || 0)}" class="cs-slider" aria-label="Progreso" />`
+                        : ''
+                    }
+
+                    <div class="ss-tx-vol">
+                      ${iconVolume()}
+                      <input type="range" id="bc-vol" min="0" max="1" step="0.05" value="${bc.volume}" class="cs-slider" aria-label="Volumen" />
+                    </div>
+                  </div>`
+                : ''
+            }
+
+            <div class="ss-tx-acts" style="margin-top:8px">
+              ${
+                isSelfEmitter && bSource === 'media'
+                  ? `<button type="button" class="tr-b ss-tx-stop" data-bc="stop">Detener transmisión</button>`
+                  : `<button type="button" class="tr-b" data-bc="start-media" ${
+                      occupiedByOther || items.length === 0 ? 'disabled' : ''
+                    }>${streamActive && isSelfEmitter ? 'Cambiar a multimedia' : 'Emitir en sala (720p)'}</button>`
+              }
+            </div>
+          </div>
+        </div>
+      </section>
+    `;
+  }
+
+  if (sheet === 'people') {
+    const { peers, self, roomCapacity, isRoomFull, orderedPeers, kickArmedId, meta } = ctx;
+    const isHost = self?.role === 'host';
+    const emitterId = meta?.emitterPeerId || null;
     return `
       <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh">
         <button type="button" class="orb sm x" data-act="close" aria-label="Cerrar">${iconClose()}</button>
         <h2 id="sh">Participantes · ${peers.length}/${roomCapacity}</h2>
-        <p id="sp">${isHost ? 'Silencia con el micrófono o quita con la x (dos toques).' : 'Quién está en la sala.'}</p>
+        <p id="sp">${
+          isHost
+            ? 'Micrófonos bloqueados · Toca el ícono de emisión para ceder escenario.'
+            : 'Micrófonos bloqueados · Audio exclusivo del emisor.'
+        }</p>
         <div id="sf">
           ${
             isHost
@@ -974,18 +1142,22 @@ export function renderRoomSheetHtml(sheet, ctx) {
           ${orderedPeers
             .map((p) => {
               const isMe = p.peerId === self?.peerId;
+              const isEmitting = emitterId === p.peerId || p.isEmitter;
               return `
                 <div class="row">
                   <i class="av" style="background:${getPeerTint(p.peerId)}">${esc(p.initial)}</i>
                   <span>
                     <b>${isMe ? 'Tú' : esc(p.name)}</b>
-                    <small>${p.role === 'host' ? 'Creador' : 'En línea'}${p.handRaised ? ' · Mano levantada' : ''}</small>
+                    <small>${isEmitting ? 'Emitiendo' : p.role === 'host' ? 'Anfitrión' : 'Espectador'}${p.handRaised ? ' · Mano levantada' : ''} · Micro bloqueado</small>
                   </span>
-                  ${!isMe ? `<button type="button" class="orb sm" data-dm="${esc(p.peerId)}" aria-label="Chat privado con ${esc(p.name)}">${iconChat()}</button>` : ''}
+                  ${
+                    isHost
+                      ? `<button type="button" class="orb sm ${isEmitting ? 'active-mint' : ''}" data-grant-emitter="${isEmitting ? '' : esc(p.peerId)}" title="${isEmitting ? 'Retirar escenario' : 'Ceder escenario'}" aria-label="${isEmitting ? 'Retirar escenario' : 'Ceder escenario'}">${iconBroadcastPro(isEmitting)}</button>`
+                      : ''
+                  }
                   ${
                     isHost && !isMe
-                      ? `<button type="button" class="orb sm tg" aria-pressed="${Boolean(p.micOn)}" data-mute="${esc(p.peerId)}" aria-label="Silenciar a ${esc(p.name)}">${iconMic(!p.micOn)}</button>
-                         <button type="button" class="orb sm rm ${kickArmedId === p.peerId ? 'arm' : ''}" data-kick="${esc(p.peerId)}" data-kick-name="${esc(p.name)}" aria-label="Quitar a ${esc(p.name)}">${iconClose()}</button>`
+                      ? `<button type="button" class="orb sm rm ${kickArmedId === p.peerId ? 'arm' : ''}" data-kick="${esc(p.peerId)}" data-kick-name="${esc(p.name)}" aria-label="Quitar a ${esc(p.name)}">${iconClose()}</button>`
                       : ''
                   }
                 </div>`;
@@ -997,35 +1169,23 @@ export function renderRoomSheetHtml(sheet, ctx) {
   }
 
   if (sheet === 'view') {
-    const { effectiveMode, viewMode, fitContain, screenSharing } = ctx;
+    const { fitContain, screenSharing } = ctx;
     const canDisplay = typeof navigator !== 'undefined' && Boolean(navigator.mediaDevices?.getDisplayMedia);
     return `
       <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh">
         <button type="button" class="orb sm x" data-act="close" aria-label="Cerrar">${iconClose()}</button>
-        <h2 id="sh">Vista</h2>
-        <p id="sp">Elige cómo ver la sala.</p>
+        <h2 id="sh">Escenario y Sala</h2>
+        <p id="sp">1 emisor + hasta 19 cámaras paginadas.</p>
         <div id="sf">
           <div class="row">
-            <span><b>Todos juntos</b><small>Cuadrícula adaptable (4 por página en grupos)</small></span>
-            <button type="button" class="orb sm ${effectiveMode === 'grid' ? 'is-active' : ''}" data-view="grid">${iconGrid()}</button>
-          </div>
-          <div class="row">
-            <span><b>Mi cámara flotante</b><small>Modo 1:1 Pro con PiP en cualquier esquina</small></span>
-            <button type="button" class="orb sm ${effectiveMode === 'stage-pip' ? 'is-active' : ''}" data-view="pip">${iconPip()}</button>
-          </div>
-          <div class="row">
-            <span><b>Imagen completa</b><small>Ver cámara completa sin recortar</small></span>
-            <button type="button" class="orb sm ${viewMode === 'fullscreen' || fitContain ? 'is-active' : ''}" data-view="full">${iconFit()}</button>
-          </div>
-          <div class="row">
-            <span><b>Intercambiar cámaras</b><small>Alterna entre tu cámara y el invitado</small></span>
-            <button type="button" class="orb sm is-active" data-view="swap">${iconSwap()}</button>
+            <span><b>Ajuste de video</b><small>${fitContain ? 'Recortar para llenar' : 'Imagen completa sin recortes'}</small></span>
+            <button type="button" class="orb sm ${!fitContain ? 'active-mint' : ''}" data-view="full">${iconFit()}</button>
           </div>
           ${
             canDisplay
               ? `<div class="row">
-                  <span><b>Compartir mi pantalla</b><small>Pantalla completa, una ventana o una pestaña</small></span>
-                  <button type="button" class="orb sm ${screenSharing ? 'is-active' : ''}" data-view="screen">${iconShare()}</button>
+                  <span><b>Centro de transmisión</b><small>Compartir pantalla o video local 720p</small></span>
+                  <button type="button" class="orb sm ${screenSharing ? 'active-mint' : ''}" data-act="open-broadcast">${iconBroadcastPro(screenSharing)}</button>
                 </div>`
               : ''
           }
@@ -1042,26 +1202,31 @@ export function renderRoomSheetHtml(sheet, ctx) {
     const { meta, endRoomArmed } = ctx;
     const locked = Boolean(meta?.locked);
     const waitingRoom = Boolean(meta?.waitingRoom);
+    const hasEmitter = Boolean(meta?.emitterPeerId);
     return `
       <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh">
         <button type="button" class="orb sm x" data-act="close" aria-label="Cerrar">${iconClose()}</button>
         <h2 id="sh">Sala</h2>
-        <p id="sp">Solo quien abrió la Suite ve esto.</p>
+        <p id="sp">Solo el anfitrión ve esto.</p>
         <div id="sf">
-          <div class="row">
-            <span><b>Silenciar a todos</b><small>Los participantes pueden volver a activarse</small></span>
-            <button type="button" class="orb sm" data-mod="muteAll">${iconMuteAll()}</button>
-          </div>
+          ${
+            hasEmitter
+              ? `<div class="row">
+                  <span><b>Liberar escenario</b><small>Detener al emisor actual</small></span>
+                  <button type="button" class="orb sm active-mint" data-mod="releaseEmitter">${iconBroadcastPro(true)}</button>
+                </div>`
+              : ''
+          }
           <div class="row">
             <span><b>Bloquear la sala</b><small>Nadie más puede entrar</small></span>
-            <button type="button" class="orb sm ${locked ? 'is-active' : ''}" data-mod="lock">${iconLock(!locked)}</button>
+            <button type="button" class="orb sm ${locked ? 'active-mint' : ''}" data-mod="lock">${iconLock(!locked)}</button>
           </div>
           <div class="row">
             <span><b>Sala de espera</b><small>Aprobar manualmente a cada invitado</small></span>
-            <button type="button" class="orb sm ${waitingRoom ? 'is-active' : ''}" data-mod="waitingRoom">${iconShield()}</button>
+            <button type="button" class="orb sm ${waitingRoom ? 'active-mint' : ''}" data-mod="waitingRoom">${iconShield()}</button>
           </div>
           <div class="row">
-            <span><b class="text-danger">Terminar sala para todos</b><small>Saca a todos y cierra la sala</small></span>
+            <span><b style="color:var(--danger)">Terminar sala para todos</b><small>Saca a todos y cierra la sala</small></span>
             <button type="button" class="orb sm rm ${endRoomArmed ? 'arm' : ''}" data-mod="endRoom">${iconLeave()}</button>
           </div>
         </div>
@@ -1076,7 +1241,7 @@ export function renderRoomSheetHtml(sheet, ctx) {
       <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh">
         <button type="button" class="orb sm x" data-act="close" aria-label="Cerrar">${iconClose()}</button>
         <h2 id="sh">${esc(self?.name || 'Mi cuenta')}</h2>
-        <p id="sp">${esc(user?.plan || (self?.role === 'host' ? 'Creador' : 'Invitado'))}</p>
+        <p id="sp">${esc(user?.plan || (self?.role === 'host' ? 'Anfitrión' : 'Invitado'))}</p>
         <div id="sf">
           <div class="row">
             <span>
@@ -1089,9 +1254,9 @@ export function renderRoomSheetHtml(sheet, ctx) {
           </div>
           ${
             editingName
-              ? `<form id="room-name-form" class="inline-name-form">
-                  <input id="room-draft-name" type="text" maxlength="24" value="${esc(draftName)}" placeholder="Tu nombre" />
-                  <button type="submit" class="tr-b inline-save-btn">Guardar</button>
+              ? `<form id="room-name-form" style="display:flex;gap:8px;margin-top:4px;margin-bottom:8px">
+                  <input id="room-draft-name" type="text" maxlength="24" value="${esc(draftName)}" placeholder="Tu nombre" style="flex:1;min-width:0;padding:10px 12px;border-radius:12px;border:1px solid var(--ln);background:var(--s2);color:var(--moon);font:500 0.92rem var(--sys);outline:none" />
+                  <button type="submit" style="padding:0 14px;border-radius:12px;border:0;background:var(--green);color:var(--ink);font:600 0.88rem var(--sys);cursor:pointer">Guardar</button>
                 </form>`
               : ''
           }
@@ -1109,65 +1274,30 @@ export function renderRoomSheetHtml(sheet, ctx) {
   }
 
   if (sheet === 'suite') {
-    const { self, user, silentMode, waitingCount, isRoomFull, pushState } = ctx;
+    const { self, user, silentMode, waitingCount, isRoomFull } = ctx;
     const isHost = self?.role === 'host';
     const isAdmin = user?.role === 'admin';
-    const pushSupported = pushState ? pushState.supported : true;
-    const pushActive = Boolean(pushState?.subscribed);
-    const pushDiscrete = pushState?.discrete !== false;
     return `
       <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh">
         <button type="button" class="orb sm x" data-act="close" aria-label="Cerrar">${iconClose()}</button>
         <h2 id="sh">Suite y controles</h2>
-        <p id="sp">${esc(self?.name || 'Invitado')} · ${isHost ? 'Creador' : 'Participante'}</p>
+        <p id="sp">${esc(self?.name || 'Invitado')} · ${isHost ? 'Anfitrión' : 'Participante'}</p>
         <div id="sf">
           <div class="row">
-            <span><b>Invitar a la sala</b><small>${isRoomFull ? 'Capacidad máxima alcanzada' : 'Comparte enlace o código directo'}</small></span>
-            <button type="button" class="orb sm is-active" ${isRoomFull ? 'disabled' : ''} data-act="open-invite">${iconShare()}</button>
+            <span><b>Invitar a la sala</b><small>${isRoomFull ? 'Capacidad máxima alcanzada' : 'Comparte enlace, código o clave'}</small></span>
+            <button type="button" class="orb sm active-mint" ${isRoomFull ? 'disabled' : ''} data-act="open-invite">${iconShare()}</button>
           </div>
-          ${
-            isHost
-              ? `<div class="row">
-                  <span><b>Personalizar recibidor SPACE</b><small>Portada, video corto en loop, título y descripción</small></span>
-                  <button type="button" class="orb sm" data-act="open-space-config">${iconCam()}</button>
-                </div>`
-              : ''
-          }
           <div class="row">
             <span><b>Sonidos y avisos</b><small>${silentMode ? 'Silenciados en esta sala' : 'Activados'}</small></span>
-            <button type="button" class="orb sm ${!silentMode ? 'is-active' : ''}" data-act="toggle-silent">${iconBell(silentMode)}</button>
+            <button type="button" class="orb sm ${!silentMode ? 'active-mint' : ''}" data-act="toggle-silent">${iconBell(silentMode)}</button>
           </div>
-          <div class="row">
-            <span><b>Notificaciones (OneSignal)</b><small>${
-              !pushSupported
-                ? 'No disponible en este navegador'
-                : pushActive
-                  ? 'Preferencia activa · llegadas y Latidos'
-                  : pushState?.permission === 'denied'
-                    ? 'Permiso bloqueado en tu navegador'
-                    : 'Estructura lista para OneSignal cuando publiques'
-            }</small></span>
-            <button type="button" class="orb sm ${pushActive ? 'is-active' : ''}" ${!pushSupported ? 'disabled' : ''} data-act="toggle-push">${iconBell(!pushActive)}</button>
-          </div>
-          ${
-            pushActive
-              ? `<div class="row">
-                  <span><b>Modo discreto en avisos</b><small>${
-                    pushDiscrete
-                      ? 'Oculta nombres y códigos en pantalla bloqueada'
-                      : 'Muestra alias y código en la notificación'
-                  }</small></span>
-                  <button type="button" class="orb sm ${pushDiscrete ? 'is-active' : ''}" data-act="toggle-push-discrete">${iconLock(!pushDiscrete)}</button>
-                </div>`
-              : ''
-          }
           <div class="row">
             <span><b>SUPER KEY · Asistente Compañero</b><small>Inteligente, empático y sin preguntas</small></span>
-            <button type="button" class="orb sm" data-act="open-superkey">${iconSuperKey()}</button>
+            <button type="button" class="orb sm" style="border-color:var(--crimson);color:var(--crimson)" data-act="open-superkey">${iconSuperKey()}</button>
           </div>
           <div class="row">
             <span><b>Mini Tienda de Latidos</b><small>Auras, soundscapes y perks con tus puntos</small></span>
-            <button type="button" class="orb sm" data-act="open-tienda">${iconReaction('heartbeat')}</button>
+            <button type="button" class="orb sm" style="border-color:var(--crimson);color:var(--crimson)" data-act="open-tienda">${iconReaction('heartbeat')}</button>
           </div>
           <div class="row">
             <span><b>Mi cuenta y cámara</b><small>Cambiar nombre o reconectar dispositivos</small></span>
@@ -1177,27 +1307,23 @@ export function renderRoomSheetHtml(sheet, ctx) {
             isHost
               ? `<div class="row">
                   <span><b>Controles de sala</b><small>${
-                    waitingCount > 0 ? `${waitingCount} en SPACE esperando` : 'Bloquear, silenciar o recibidor SPACE'
+                    waitingCount > 0 ? `${waitingCount} esperando aprobación` : 'Bloquear, silenciar o sala de espera'
                   }</small></span>
-                  <button type="button" class="orb sm ${waitingCount > 0 ? 'is-active' : ''}" data-act="open-mod">${iconShield()}</button>
+                  <button type="button" class="orb sm ${waitingCount > 0 ? 'active-mint' : ''}" data-act="open-mod">${iconShield()}</button>
                 </div>`
               : ''
           }
           ${
             isAdmin
               ? `<div class="row">
-                  <span><b>Panel de Control</b><small>Métricas en vivo, usuarios y salas</small></span>
-                  <button type="button" class="orb sm is-active" data-act="open-admin">${iconChart()}</button>
+                  <span><b>Panel Admin Pro</b><small>Métricas en vivo, usuarios y salas</small></span>
+                  <button type="button" class="orb sm active-mint" data-act="open-admin">${iconChart()}</button>
                 </div>`
               : ''
           }
         </div>
       </section>
     `;
-  }
-
-  if (sheet === 'space-config') {
-    return renderSpaceConfigSheetHtml(ctx.suiteProfile || null);
   }
 
   if (sheet === 'tienda') {
@@ -1260,7 +1386,7 @@ export function renderMiniTiendaHtml() {
         </div>
 
         <div class="row2" style="margin-top:14px">
-          <button type="button" class="tr-b" data-act="invite-more">Invitar amigos (+3 Latidos)</button>
+          <button type="button" class="tr-b" data-act="invite-more" style="background:var(--crimson);color:#fff">Invitar amigos (+3 Latidos)</button>
         </div>
       </div>
     </section>
@@ -1431,55 +1557,26 @@ export class SuperKeyController {
   destroy() {}
 }
 
-export function renderSpaceConfigSheetHtml(profile = null) {
-  const p = profile || {};
-  return `
-    <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh">
-      <button type="button" class="orb sm x" data-act="close" data-lsh="close" aria-label="Cerrar">${iconClose()}</button>
-      <h2 id="sh">Personalizar SPACE</h2>
-      <p id="sp">Configura lo que verán tus invitados en el recibidor antes de pedir entrada. Si lo dejas vacío, se mostrará el fondo arquitectónico oscuro.</p>
-      <form id="space-config-form" class="space-cfg-form">
-        <label class="space-cfg-field">
-          <span>Título de tu Suite</span>
-          <input id="spc-title" type="text" maxlength="80" placeholder="Ej. Noche de plática sin filtros" value="${esc(p.title || '')}" />
-        </label>
-        <label class="space-cfg-field">
-          <span>Descripción breve</span>
-          <textarea id="spc-desc" maxlength="220" rows="2" placeholder="Cuéntales el mood o de qué va esta Suite...">${esc(p.description || '')}</textarea>
-        </label>
-        <label class="space-cfg-field">
-          <span>URL de video corto en loop (MP4 / WebM)</span>
-          <input id="spc-cover-vid" type="url" maxlength="600" placeholder="https://.../ambiente.mp4 (opcional)" value="${esc(p.coverVideo || '')}" />
-        </label>
-        <label class="space-cfg-field">
-          <span>URL de imagen de portada (si no usas video)</span>
-          <input id="spc-cover-img" type="url" maxlength="600" placeholder="https://.../portada.jpg (opcional)" value="${esc(p.coverImage || '')}" />
-        </label>
-        <div class="row2" style="margin-top:6px">
-          <button type="submit" class="tr-b">Guardar SPACE</button>
-          <button type="button" class="tr-g" data-act="reset-space-config">Fondo por defecto</button>
-        </div>
-      </form>
-    </section>
-  `;
-}
-
-export function renderQuickPeekHtml(peer, selfPeerId) {
+export function renderQuickPeekHtml(peer, selfPeerId, isHost = false, isEmitting = false) {
   if (!peer) return '';
   return `
     <div class="pv" id="pv"></div>
     <div class="pm">
       <div>
         <b>${esc(peer.name)}</b>
-        <span>${peer.role === 'host' ? 'Creador' : 'En línea'}</span>
+        <span>${isEmitting ? 'Emitiendo' : peer.role === 'host' ? 'Anfitrión' : 'Espectador'}</span>
       </div>
       <div class="a">
+        ${
+          isHost
+            ? `<button type="button" class="orb ${isEmitting ? 'active-mint' : ''}" data-pk="grant" aria-label="${isEmitting ? 'Retirar escenario' : 'Ceder escenario'}" title="${isEmitting ? 'Retirar escenario' : 'Ceder escenario'}">${iconBroadcastPro(isEmitting)}</button>`
+            : ''
+        }
         ${
           peer.peerId !== selfPeerId
             ? `<button type="button" class="orb" data-pk="wave" aria-label="Enviar una onda">${iconWave()}</button>`
             : ''
         }
-        <button type="button" class="orb" data-pk="full" aria-label="Ver en grande">${iconFit()}</button>
         <button type="button" class="orb" data-pk="close" aria-label="Cerrar">${iconClose()}</button>
       </div>
     </div>

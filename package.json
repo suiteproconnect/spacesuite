@@ -6,11 +6,12 @@
   "scripts": {
     "dev": "node --experimental-strip-types dev-server.mjs",
     "start": "node --experimental-strip-types dev-server.mjs",
-    "build": "node --check app.js && node --check js/icons.js && node --check js/identity.js && node --check js/push.js && node --check js/rtc.js && node --check js/sheets.js && node --check js/lobby.js && node --check js/room-ui.js",
+    "build": "node --check app.js && node --check js/icons.js && node --check js/identity.js && node --check js/push.js && node --check js/media-playlist.js && node --check js/rtc.js && node --check js/sheets.js && node --check js/lobby.js && node --check js/room-ui.js",
     "preview": "node --experimental-strip-types dev-server.mjs",
-    "lint": "node --check dev-server.mjs && node --check app.js && node --check js/icons.js && node --check js/identity.js && node --check js/push.js && node --check js/rtc.js && node --check js/sheets.js && node --check js/lobby.js && node --check js/room-ui.js"
+    "lint": "node --check dev-server.mjs && node --check app.js && node --check js/icons.js && node --check js/identity.js && node --check js/push.js && node --check js/media-playlist.js && node --check js/rtc.js && node --check js/sheets.js && node --check js/lobby.js && node --check js/room-ui.js"
   },
   "dependencies": {
-    "@google/genai": "^3.3.0"
+    "@google/genai": "^3.3.0",
+    "ws": "^8.23.0"
   }
 }

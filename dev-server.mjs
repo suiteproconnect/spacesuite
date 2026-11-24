@@ -4,6 +4,8 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { WebSocketServer } from 'ws';
+import { LocalRoomWsHub } from './functions/_shared/local-ws-hub.ts';
 
 const PORT = Number(process.env.PORT || 3000);
 const ROOT_DIR = process.cwd();
@@ -102,9 +104,31 @@ function createNodeSqliteD1(dbFilePath) {
 }
 
 const localDb = createNodeSqliteD1(path.join(ROOT_DIR, '.data', 'spacesuite.sqlite'));
+const wsHub = new LocalRoomWsHub();
 const runtimeEnv = {
   ...process.env,
   DB: localDb,
+  ROOM_DO: {
+    idFromName(name) {
+      return name;
+    },
+    get(id) {
+      return {
+        async fetch() {
+          const code = String(id || '');
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              code,
+              participants: wsHub.getRoomCount(code),
+              maxParticipants: 20,
+            }),
+            { headers: { 'Content-Type': 'application/json; charset=utf-8' } },
+          );
+        },
+      };
+    },
+  },
 };
 
 const MIME_TYPES = {
@@ -127,7 +151,9 @@ const MIME_TYPES = {
 const STATIC_API_ROUTES = {
   '/api/health': 'api/health.ts',
   '/api/salud': 'api/salud.ts',
-  '/api/metered/session': 'api/metered/session.ts',
+  '/api/calls/session': 'api/calls/session.ts',
+  '/api/calls/tracks': 'api/calls/tracks.ts',
+  '/api/calls/renegotiate': 'api/calls/renegotiate.ts',
   '/api/auth/status': 'api/auth/status.ts',
   '/api/auth/register': 'api/auth/register.ts',
   '/api/auth/verify-email': 'api/auth/verify-email.ts',
@@ -327,6 +353,25 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+const wss = new WebSocketServer({ noServer: true });
+
+server.on('upgrade', (req, socket, head) => {
+  try {
+    const url = new URL(req.url || '/', `http://127.0.0.1:${PORT}`);
+    const match = /^\/api\/room\/([^/]+)\/ws$/.exec(url.pathname);
+    if (!match) {
+      socket.destroy();
+      return;
+    }
+    const roomCode = decodeURIComponent(match[1]);
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wsHub.handleConnection(ws, roomCode);
+    });
+  } catch {
+    socket.destroy();
+  }
+});
+
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`spaceSUITE static + Cloudflare Functions dev server listening on http://0.0.0.0:${PORT}`);
+  console.log(`spaceSUITE static + Cloudflare Functions + WS dev server listening on http://0.0.0.0:${PORT}`);
 });
