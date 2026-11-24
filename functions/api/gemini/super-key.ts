@@ -1,4 +1,4 @@
-import { jsonResponse, type PagesContext } from '../_shared/cf.ts';
+import { jsonResponse, type PagesContext } from '../../_shared/cf.ts';
 
 const SUPER_KEY_SYSTEM_INSTRUCTION = `Eres SUPER KEY, el compañero inteligente, cálido, empático y confidente dentro de spaceSUITE (la plataforma de salas de video privadas, cara a cara, sin barreras y con audio espacial).
 
