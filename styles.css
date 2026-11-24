@@ -4909,10 +4909,26 @@ body:not(.fit) #ss-stage-vid {
 
 .ss-bp-svg .ss-bp-led {
   fill: #94a3b8;
+  transition: fill 0.2s ease, filter 0.2s ease;
+}
+
+.ss-bp-svg.has-media .ss-bp-led,
+.ss-broadcast-btn.has-media .ss-bp-led {
+  fill: #34D399;
+  opacity: 0.9;
+}
+
+.ss-bp-svg.is-prep .ss-bp-led,
+.ss-broadcast-btn.is-prep .ss-bp-led {
+  fill: #E5173F;
+  filter: drop-shadow(0 0 4px rgba(229, 23, 63, 0.85));
+  animation: ssLedPulse 0.9s ease-in-out infinite;
 }
 
 .ss-bp-svg.is-live .ss-bp-led {
   fill: #3ee6b4;
+  filter: drop-shadow(0 0 4px rgba(62, 230, 180, 0.9));
+  animation: ssLedPulse 1.6s ease-in-out infinite;
 }
 
 .ss-bp-svg.is-live .ss-bp-w1 {
@@ -4921,6 +4937,11 @@ body:not(.fit) #ss-stage-vid {
 
 .ss-bp-svg.is-live .ss-bp-w2 {
   animation: ssWaveOuter 1.4s ease-in-out 0.25s infinite;
+}
+
+@keyframes ssLedPulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
 }
 
 @keyframes ssWaveInner {

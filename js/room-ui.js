@@ -93,12 +93,13 @@ const SPACE_CARDS = [
 ];
 
 export class RoomController {
-  constructor(mountEl, { initialRoomCode, initialPass, initialName, wantHost, user, onExitHome, onNewRoom, onUpdateUserName }) {
+  constructor(mountEl, { initialRoomCode, initialPass, initialName, wantHost, user, broadcastHub, onExitHome, onNewRoom, onUpdateUserName }) {
     this.mountEl = mountEl;
     this.initialRoomCode = initialRoomCode;
     this.initialPass = initialPass || '';
     this.wantHost = Boolean(wantHost);
     this.user = user;
+    this.broadcastHub = broadcastHub || null;
     this.onExitHome = onExitHome;
     this.onNewRoom = onNewRoom;
     this.onUpdateUserName = onUpdateUserName;
@@ -184,8 +185,15 @@ export class RoomController {
     this._lastCarouselSig = '';
     this._carouselScrollRaf = null;
 
-    this.mediaBroadcaster = new LocalMediaBroadcaster(() => this._onMediaBroadcasterChange());
-    this.mediaBroadcaster.loadStoredPlaylist().catch(() => {});
+    if (this.broadcastHub) {
+      this.mediaBroadcaster = this.broadcastHub.broadcaster;
+      this._unsubBroadcastHub = this.broadcastHub.subscribe(() => this._onMediaBroadcasterChange());
+      this.broadcastHub.hydratePlaylist().catch(() => {});
+    } else {
+      this.mediaBroadcaster = new LocalMediaBroadcaster(() => this._onMediaBroadcasterChange());
+      this._unsubBroadcastHub = null;
+      this.mediaBroadcaster.loadStoredPlaylist().catch(() => {});
+    }
 
     this._buildScaffold();
     this.engine = new RoomEngine(() => this._onEngineChange());
@@ -463,7 +471,7 @@ export class RoomController {
 
     if (this.sheet === 'broadcast') {
       const nextStructSig = [
-        snap.items.length,
+        snap.items.map((it) => it.id).join(','),
         snap.activeIndex,
         snap.playing,
         snap.loop,
@@ -488,8 +496,11 @@ export class RoomController {
       }
     }
 
-    if (st.status === 'connected' && isSelfEmitter) {
-      this._renderStageWorkspace();
+    if (st.status === 'connected') {
+      this._renderUiAndDock();
+      if (isSelfEmitter) {
+        this._renderStageWorkspace();
+      }
     }
   }
 
@@ -1176,7 +1187,16 @@ export class RoomController {
     const bStatus = st.meta?.broadcast?.status || 'idle';
     const isBroadcastLive = bStatus === 'live' && Boolean(emitterId);
     const isPreparing = bStatus === 'preparing' && Boolean(emitterId);
+    const hasQueuedMedia = (this.mediaBroadcaster?.items?.length || 0) > 0;
     const studioActive = this.studioOpen || Boolean(st.self.handRaised);
+
+    if (this.broadcastHub) {
+      this.broadcastHub.setBroadcastState({
+        status: emitterId ? bStatus : 'idle',
+        isSelfEmitter,
+        sourceType: st.meta?.broadcast?.sourceType || 'none',
+      });
+    }
 
     const sig = [
       st.self.role,
@@ -1188,6 +1208,7 @@ export class RoomController {
       st.waiting.length,
       emitterId || '',
       bStatus,
+      hasQueuedMedia,
       this.silentMode,
       this.studioOpen,
       this.subtitlesActive,
@@ -1221,7 +1242,7 @@ export class RoomController {
         </div>
       </div>
       <div class="ctl" id="dock">
-        <button type="button" class="orb ss-broadcast-btn ${isBroadcastLive ? 'is-live' : isPreparing ? 'is-prep' : ''}" data-dock="broadcast" aria-label="Centro de Transmisión">
+        <button type="button" class="orb ss-broadcast-btn ${isBroadcastLive ? 'is-live' : isPreparing ? 'is-prep' : hasQueuedMedia ? 'has-media' : ''}" data-dock="broadcast" aria-label="Centro de Transmisión">
           ${iconBroadcastPro(isBroadcastLive)}
           <span class="lb">${isSelfEmitter ? (isPreparing ? 'Prep…' : 'En vivo') : 'Emitir'}</span>
         </button>
@@ -1233,6 +1254,9 @@ export class RoomController {
         <button type="button" class="orb leave ${this.leaveArmed ? 'arm' : ''}" data-dock="leave" aria-label="Salir">${iconLeave()}<span class="lb">Salir</span></button>
       </div>
     `;
+    if (this.broadcastHub) {
+      this.broadcastHub.syncBroadcastButtonLed(this.uiEl);
+    }
   }
 
   _renderSheetAndPeek() {
@@ -1247,7 +1271,7 @@ export class RoomController {
     let sheetSig = String(this.sheet || '');
     if (this.sheet === 'broadcast') {
       const bcSig = [
-        broadcastSnapshot.items.length,
+        broadcastSnapshot.items.map((it) => it.id).join(','),
         broadcastSnapshot.activeIndex,
         broadcastSnapshot.playing,
         broadcastSnapshot.loop,
@@ -1995,9 +2019,17 @@ export class RoomController {
     this.sheetSlot.addEventListener('change', async (e) => {
       if (e.target.id === 'bc-file-input' && e.target.files?.length) {
         const files = e.target.files;
-        await this.mediaBroadcaster.addFiles(files);
+        const result = this.broadcastHub
+          ? await this.broadcastHub.pickMediaFiles(files)
+          : await this.mediaBroadcaster.addFiles(files);
         e.target.value = '';
-        this.showToast('Archivos cargados a tu playlist local');
+        if (result?.error) {
+          this.showToast(result.error);
+        } else if (result?.added?.length > 0) {
+          this.showToast(`${result.added.length} archivo(s) guardados en tu playlist`);
+        } else {
+          this.showToast('Selecciona videos o fotos compatibles');
+        }
       }
     });
 
@@ -2049,11 +2081,20 @@ export class RoomController {
           this._setSheet(null);
           await this.engine.startScreenBroadcast();
         } else if (bcAct === 'pick-files') {
-          this.sheetSlot.querySelector('#bc-file-input')?.click();
+          const inputEl = this.sheetSlot.querySelector('#bc-file-input');
+          if (this.broadcastHub) {
+            this.broadcastHub.openMediaPicker(inputEl);
+          } else {
+            inputEl?.click();
+          }
         } else if (bcAct === 'clear-files') {
-          this.mediaBroadcaster.stopPlayback();
-          await clearPlaylistItems();
-          await this.mediaBroadcaster.loadStoredPlaylist();
+          if (this.broadcastHub) {
+            await this.broadcastHub.clearPlaylist();
+          } else {
+            this.mediaBroadcaster.stopPlayback();
+            await clearPlaylistItems();
+            await this.mediaBroadcaster.loadStoredPlaylist();
+          }
           this.showToast('Playlist local vaciada');
         } else if (bcAct === 'prev') {
           const snap = this.mediaBroadcaster.getSnapshot();
@@ -2270,7 +2311,15 @@ export class RoomController {
   destroy() {
     this._destroyed = true;
     this._releaseWakeLock();
-    this.mediaBroadcaster.destroy();
+    if (this._unsubBroadcastHub) {
+      this._unsubBroadcastHub();
+      this._unsubBroadcastHub = null;
+    }
+    if (this.broadcastHub) {
+      this.mediaBroadcaster.stopPlayback();
+    } else {
+      this.mediaBroadcaster.destroy();
+    }
     if (this._carouselScrollRaf) window.cancelAnimationFrame(this._carouselScrollRaf);
     if (this.subtitleClearTimer) window.clearTimeout(this.subtitleClearTimer);
     window.removeEventListener('resize', this._onResize);

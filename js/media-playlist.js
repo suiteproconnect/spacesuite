@@ -40,34 +40,61 @@ export async function listPlaylistItems() {
   }
 }
 
+const VIDEO_EXT_RE = /\.(mp4|mov|m4v|webm|mkv|avi|3gp|ogv)$/i;
+const IMAGE_EXT_RE = /\.(png|jpe?g|webp|gif|heic|heif|avif|bmp)$/i;
+
+export function detectMediaKind(file) {
+  if (!file) return null;
+  const mime = String(file.type || '').toLowerCase();
+  if (mime.startsWith('video/')) return 'video';
+  if (mime.startsWith('image/')) return 'image';
+  const name = String(file.name || '');
+  if (VIDEO_EXT_RE.test(name)) return 'video';
+  if (IMAGE_EXT_RE.test(name)) return 'image';
+  return null;
+}
+
 export async function addPlaylistFiles(fileList) {
-  const files = Array.from(fileList || []).filter(
-    (f) => f && (f.type.startsWith('video/') || f.type.startsWith('image/')),
-  );
-  if (files.length === 0) return [];
+  const raw = Array.from(fileList || []);
+  const accepted = raw
+    .map((file) => ({ file, kind: detectMediaKind(file) }))
+    .filter((entry) => Boolean(entry.kind));
+  if (accepted.length === 0) {
+    return { added: [], skipped: raw.length, error: null };
+  }
+
   const db = await openPlaylistDb();
   const created = [];
   const baseTs = Date.now();
-  await new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, 'readwrite');
-    const store = tx.objectStore(STORE_NAME);
-    files.forEach((file, idx) => {
-      const item = {
-        id: crypto.randomUUID(),
-        name: file.name || `Archivo ${idx + 1}`,
-        kind: file.type.startsWith('image/') ? 'image' : 'video',
-        mime: file.type || 'application/octet-stream',
-        size: file.size || 0,
-        blob: file,
-        addedAt: baseTs + idx,
-      };
-      created.push(item);
-      store.put(item);
+  try {
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      accepted.forEach(({ file, kind }, idx) => {
+        const item = {
+          id: crypto.randomUUID(),
+          name: file.name || `Archivo ${idx + 1}`,
+          kind,
+          mime: file.type || (kind === 'image' ? 'image/jpeg' : 'video/mp4'),
+          size: file.size || 0,
+          blob: file,
+          addedAt: baseTs + idx,
+        };
+        created.push(item);
+        store.put(item);
+      });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('Error guardando en IndexedDB'));
+      tx.onabort = () => reject(tx.error || new Error('Espacio insuficiente en IndexedDB'));
     });
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-  return created;
+    return { added: created, skipped: raw.length - accepted.length, error: null };
+  } catch (err) {
+    const msg =
+      err?.name === 'QuotaExceededError'
+        ? 'Memoria del navegador llena; borra algunos archivos de la playlist.'
+        : err?.message || 'No se pudieron guardar los archivos en IndexedDB.';
+    return { added: [], skipped: raw.length, error: msg };
+  }
 }
 
 export async function removePlaylistItem(id) {
@@ -276,12 +303,12 @@ export class LocalMediaBroadcaster {
 
   async addFiles(fileList) {
     const prevLen = this.items.length;
-    await addPlaylistFiles(fileList);
+    const result = await addPlaylistFiles(fileList);
     await this.loadStoredPlaylist();
     if (prevLen === 0 && this.items.length > 0) {
       await this.selectItem(0, false);
     }
-    return this.items;
+    return result;
   }
 
   async removeItem(id) {
@@ -369,6 +396,23 @@ export class LocalMediaBroadcaster {
     this._emit();
   }
 
+  _scheduleImageAdvance() {
+    if (this._imageTimer) {
+      window.clearTimeout(this._imageTimer);
+      this._imageTimer = null;
+    }
+    if (this.items.length <= 1) return;
+    this._imageTimer = window.setTimeout(() => {
+      const next = this.activeIndex + 1;
+      if (next < this.items.length) this.selectItem(next, true);
+      else if (this.loop) this.selectItem(0, true);
+      else {
+        this.playing = false;
+        this._emit();
+      }
+    }, 8000);
+  }
+
   async togglePlay() {
     const item = this.items[this.activeIndex];
     if (!item) return;
@@ -377,6 +421,12 @@ export class LocalMediaBroadcaster {
     }
     if (item.kind === 'image') {
       this.playing = !this.playing;
+      if (this.playing) {
+        this._scheduleImageAdvance();
+      } else if (this._imageTimer) {
+        window.clearTimeout(this._imageTimer);
+        this._imageTimer = null;
+      }
       this._emit();
       return;
     }
