@@ -1,17 +1,4 @@
-name = "spacesuite"
-main = "workers/app.ts"
+name = "space-suite"
+pages_build_output_dir = "."
 compatibility_date = "2025-05-01"
 compatibility_flags = ["nodejs_compat"]
-
-[assets]
-directory = "."
-binding = "ASSETS"
-run_worker_first = true
-
-[[durable_objects.bindings]]
-name = "ROOM_DO"
-class_name = "RoomDurableObject"
-
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = ["RoomDurableObject"]
