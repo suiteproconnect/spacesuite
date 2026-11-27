@@ -176,6 +176,9 @@ export class RoomController {
     this._prevStatus = 'idle';
     this._destroyed = false;
     this._lastMediaNotice = null;
+    this._lastJoinSeen = null;
+    this._debugEl = null;
+    this._debugIv = null;
     this.adminCtrl = null;
     this._lastSheetSig = '';
     this._lastPeekSig = '';
@@ -197,6 +200,7 @@ export class RoomController {
 
     this._buildScaffold();
     this.engine = new RoomEngine(() => this._onEngineChange());
+    this._setupDebugPanel();
     this._bindEvents();
     this._requestPreJoinPermissions();
     this._renderAll();
@@ -504,9 +508,42 @@ export class RoomController {
     }
   }
 
+  // Panel de diagnóstico: solo aparece si la dirección termina en ?debug=1
+  _setupDebugPanel() {
+    let on = false;
+    try {
+      on = new URLSearchParams(window.location.search).get('debug') === '1';
+    } catch {
+      on = false;
+    }
+    if (!on) return;
+    const el = document.createElement('pre');
+    el.setAttribute('aria-hidden', 'true');
+    el.style.cssText =
+      'position:fixed;left:6px;right:6px;bottom:6px;z-index:99999;margin:0;padding:6px 8px;' +
+      'font:10px/1.35 ui-monospace,Menlo,monospace;color:#34D399;background:rgba(2,3,10,.88);' +
+      'border:1px solid rgba(16,185,129,.35);border-radius:8px;white-space:pre-wrap;pointer-events:none;';
+    document.body.appendChild(el);
+    this._debugEl = el;
+    this._debugIv = window.setInterval(() => {
+      el.textContent = this.engine.getDiagnostics();
+    }, 1000);
+  }
+
   _onEngineChange() {
     if (this._destroyed) return;
     const st = this.engine.state;
+
+    if (st.lastJoin && st.lastJoin.id !== this._lastJoinSeen) {
+      this._lastJoinSeen = st.lastJoin.id;
+      const names = Array.isArray(st.lastJoin.names) ? st.lastJoin.names : [];
+      this.showToast(
+        names.length === 1
+          ? `${names[0]} entró a la sala`
+          : `${names.length} personas entraron a la sala`,
+      );
+      if (!this.silentMode) playSound('join');
+    }
 
     if (st.mediaNotice && st.mediaNotice !== this._lastMediaNotice) {
       this._lastMediaNotice = st.mediaNotice;
@@ -1201,6 +1238,8 @@ export class RoomController {
     const sig = [
       st.self.role,
       st.self.camOn,
+      st.self.micOn,
+      this.engine.isMicUnlocked(),
       st.self.handRaised,
       st.peers.length,
       st.roomCapacity,
@@ -1246,7 +1285,11 @@ export class RoomController {
           ${iconBroadcastPro(isBroadcastLive)}
           <span class="lb">${isSelfEmitter ? (isPreparing ? 'Prep…' : 'En vivo') : 'Emitir'}</span>
         </button>
-        <button type="button" class="orb tg ss-mic-locked" data-dock="mic" aria-pressed="false" aria-label="Micrófono bloqueado">${iconMic(true)}<span class="lb">Bloq.</span></button>
+        ${
+          this.engine.isMicUnlocked()
+            ? `<button type="button" class="orb tg" data-dock="mic" aria-pressed="${Boolean(st.self.micOn)}" aria-label="Micrófono">${iconMic(!st.self.micOn)}<span class="lb">Mic</span></button>`
+            : `<button type="button" class="orb tg ss-mic-locked" data-dock="mic" aria-disabled="true" aria-pressed="false" aria-label="Micrófono bloqueado en esta sala">${iconMic(true)}<span class="lb">Bloq.</span></button>`
+        }
         <button type="button" class="orb tg" data-dock="cam" aria-pressed="${st.self.camOn}" ${isSelfEmitter ? 'disabled' : ''} aria-label="Cámara">${iconCam(!st.self.camOn)}<span class="lb">Cámara</span></button>
         <button type="button" class="orb btn-latido" data-dock="latido" aria-label="Latido 1:1">${iconReaction('heartbeat')}<span class="lb">Latido</span></button>
         <button type="button" class="orb ${studioActive ? 'active-mint' : ''}" data-dock="studio" aria-pressed="${this.studioOpen}" aria-label="Estudio interactivo">${iconSparkles()}<span class="lb">Estudio</span></button>
@@ -1848,7 +1891,11 @@ export class RoomController {
         this.studioOpen = false;
         this._setSheet('broadcast');
       } else if (d === 'mic') {
-        this.engine.toggleMic();
+        if (this.engine.isMicUnlocked()) {
+          this.engine.toggleMic();
+        } else {
+          this.showToast('Micrófonos bloqueados · Solo suena la transmisión en vivo');
+        }
       } else if (d === 'cam') {
         this.engine.toggleCam();
       } else if (d === 'superkey') {
@@ -2334,6 +2381,8 @@ export class RoomController {
     if (this.adminCtrl) this.adminCtrl.destroy();
     this.chatHud.destroy();
     if (!this.handedOffPreview) this._stopPreviewStream();
+    if (this._debugIv) window.clearInterval(this._debugIv);
+    if (this._debugEl) this._debugEl.remove();
     this.engine.destroy();
     document.body.classList.remove(
       'fit',

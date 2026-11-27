@@ -407,6 +407,8 @@ function rowToPeerInfo(row: Record<string, unknown>): PeerInfo {
 
 function rowToRoomMeta(row: Record<string, unknown>): RoomMeta {
   const broadcast = parseBroadcastState(row.broadcast_json);
+  const interactive = parseInteractiveState(row.interactive_json);
+  const mode = (interactive as { mode?: 'normal' | 'broadcast' }).mode === 'normal' ? 'normal' : 'broadcast';
   return {
     code: String(row.code),
     pass: row.pass ? String(row.pass) : undefined,
@@ -417,7 +419,8 @@ function rowToRoomMeta(row: Record<string, unknown>): RoomMeta {
     spotlightPeerId: row.spotlight_peer_id ? String(row.spotlight_peer_id) : null,
     emitterPeerId: row.emitter_peer_id ? String(row.emitter_peer_id) : broadcast.emitterPeerId,
     broadcast,
-    interactive: parseInteractiveState(row.interactive_json),
+    interactive,
+    mode,
   };
 }
 
@@ -1293,7 +1296,7 @@ export async function saveRoomMetaAndLists(
         meta.spotlightPeerId ?? null,
         meta.emitterPeerId ?? null,
         JSON.stringify(meta.broadcast || defaultBroadcastState()),
-        JSON.stringify(meta.interactive || {}),
+        JSON.stringify({ ...(meta.interactive || {}), mode: meta.mode || 'broadcast' }),
         now,
         code,
       )

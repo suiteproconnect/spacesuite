@@ -9,13 +9,16 @@ import {
   iconChat,
   iconCheck,
   iconClose,
+  iconExpand,
   iconFit,
   iconGrid,
   iconHeartbeat,
   iconLeave,
   iconLock,
   iconLoop,
+  iconMediaPlaylist,
   iconMic,
+  iconMinimize,
   iconMuteAll,
   iconNext,
   iconPause,
@@ -23,6 +26,7 @@ import {
   iconPlay,
   iconPrev,
   iconReaction,
+  iconScreenShare,
   iconSend,
   iconSettings,
   iconShare,
@@ -552,7 +556,7 @@ function formatMessageTime(ts) {
 }
 
 export class ChatHudController {
-  constructor(mountEl, { embedded = false, onSend, onTyping, onClose, onChangeTarget, onUpdateSettings, onPeerDepartedFallback }) {
+  constructor(mountEl, { embedded = false, onSend, onTyping, onClose, onChangeTarget, onUpdateSettings, onPeerDepartedFallback, onToggleMinimize }) {
     this.mountEl = mountEl;
     this.embedded = Boolean(embedded);
     this.onSend = onSend;
@@ -561,6 +565,7 @@ export class ChatHudController {
     this.onChangeTarget = onChangeTarget;
     this.onUpdateSettings = onUpdateSettings;
     this.onPeerDepartedFallback = onPeerDepartedFallback;
+    this.onToggleMinimize = typeof onToggleMinimize === 'function' ? onToggleMinimize : () => {};
 
     this.open = this.embedded;
     this.selfPeerId = null;
@@ -599,6 +604,7 @@ export class ChatHudController {
         <div class="chat-hud-head">
           <div id="ctabs"></div>
           <div class="chat-head-acts">
+            <button type="button" class="orb sm chat-icon-btn ss-spatial-min-btn" id="chat-min-btn" aria-label="Minimizar chat espacial" title="Minimizar chat para ampliar cámaras">${iconMinimize()}</button>
             <button type="button" class="orb sm chat-icon-btn" id="chat-cfg-btn" aria-label="Ajustes del chat" title="Ajustes del chat">${iconSettings()}</button>
             <button type="button" class="orb sm chat-icon-btn" id="chat-cls-btn" aria-label="Cerrar chat" ${this.embedded ? 'hidden' : ''}>${iconClose()}</button>
           </div>
@@ -623,6 +629,7 @@ export class ChatHudController {
     this.tabsEl = this.mountEl.querySelector('#ctabs');
     this.cfgBtn = this.mountEl.querySelector('#chat-cfg-btn');
     this.clsBtn = this.mountEl.querySelector('#chat-cls-btn');
+    this.minBtn = this.mountEl.querySelector('#chat-min-btn');
     this.settingsBox = this.mountEl.querySelector('#chat-settings-box');
     this.bodyBox = this.mountEl.querySelector('#chat-body-box');
     this.msgsEl = this.mountEl.querySelector('#msgs');
@@ -632,6 +639,9 @@ export class ChatHudController {
     this.formEl = this.mountEl.querySelector('#cb');
     this.inputEl = this.mountEl.querySelector('#ci');
 
+    if (this.minBtn) {
+      this.minBtn.addEventListener('click', () => this.onToggleMinimize());
+    }
     this.clsBtn.addEventListener('click', () => this.onClose());
     this.cfgBtn.addEventListener('click', () => {
       this.settingsOpen = !this.settingsOpen;
@@ -991,29 +1001,42 @@ export function renderRoomSheetHtml(sheet, ctx) {
     const canDisplay = typeof navigator !== 'undefined' && Boolean(navigator.mediaDevices?.getDisplayMedia);
 
     return `
-      <section class="sheet ss-tx-sheet" role="dialog" aria-modal="true" aria-labelledby="sh">
+      <section class="sheet ss-tx-sheet ss-broadcast-glass-menu" role="dialog" aria-modal="true" aria-labelledby="sh">
         <button type="button" class="orb sm x" data-act="close" aria-label="Cerrar">${iconClose()}</button>
         <div class="ss-tx-title-row">
-          ${iconBroadcastPro(isSelfEmitter && bStatus === 'live')}
-          <div>
-            <h2 id="sh">Centro de Transmisión</h2>
-            <p id="sp" style="margin:0">${
+          <div class="ss-bc-icon-glow">
+            ${iconBroadcastPro(isSelfEmitter && bStatus === 'live')}
+          </div>
+          <div class="ss-bc-head-text">
+            <div style="display:flex;align-items:center;gap:8px">
+              <h2 id="sh">Centro de Emisión</h2>
+              ${
+                isSelfEmitter && bStatus === 'live'
+                  ? `<span class="ss-led-chip live"><i class="ss-bp-led"></i> EN VIVO</span>`
+                  : isSelfEmitter && bStatus === 'preparing'
+                    ? `<span class="ss-led-chip prep"><i class="ss-bp-led"></i> PREPARANDO</span>`
+                    : items.length > 0
+                      ? `<span class="ss-led-chip ready"><i class="ss-bp-led"></i> ${items.length} ARCHIVO(S)</span>`
+                      : `<span class="ss-led-chip idle"><i class="ss-bp-led"></i> STANDBY</span>`
+              }
+            </div>
+            <p id="sp" style="margin:2px 0 0;font-size:0.76rem;color:var(--dim)">${
               occupiedByOther
                 ? `Escenario ocupado por ${esc(meta?.broadcast?.emitterName || 'otro participante')}`
                 : isSelfEmitter
                   ? bStatus === 'preparing'
-                    ? 'Preparando transmisión privada en negro'
-                    : `Emitiendo en vivo · ${bSource === 'media' ? 'Multimedia' : 'Pantalla'}`
-                  : '1 emisor exclusivo · micrófonos bloqueados'
+                    ? 'Preparando transmisión protegida en negro (720p)'
+                    : `Emitiendo en vivo · ${bSource === 'media' ? 'Multimedia local' : 'Pantalla compartida'}`
+                  : 'Emisión en escenario principal · 720p SFU optimizado'
             }</p>
           </div>
         </div>
 
-        <div id="sf">
+        <div id="sf" class="ss-bc-glass-body">
           ${
             occupiedByOther
               ? `<div class="ss-tx-lock-box">
-                  <span>Solo 1 participante puede emitir pantalla o video a la vez.</span>
+                  <span>Solo 1 participante puede emitir en el escenario a la vez.</span>
                   ${
                     isHost
                       ? `<button type="button" class="tr-g" data-bc="release">Retomar escenario</button>`
@@ -1023,26 +1046,37 @@ export function renderRoomSheetHtml(sheet, ctx) {
               : ''
           }
 
-          <div class="ss-tx-section">
-            <div class="ss-tx-sec-head">
-              <b>a) Transmitir Pantalla / App</b>
-              <small>Pantalla negra LED hasta que la fuente esté lista (sin exponer menús)</small>
+          <!-- Option 1: Capturar Pantalla -->
+          <div class="ss-bc-card ${isSelfEmitter && bSource === 'screen' ? 'is-active-source' : ''}">
+            <div class="ss-bc-card-header">
+              <div class="ss-bc-card-icon">${iconScreenShare()}</div>
+              <div class="ss-bc-card-titles">
+                <b>Capturar Pantalla (getDisplayMedia)</b>
+                <small>Transmite una ventana, pestaña o escritorio completo en 720p con audio</small>
+              </div>
             </div>
-            <div class="ss-tx-acts">
+            <div class="ss-bc-card-action">
               ${
                 isSelfEmitter && bSource === 'screen'
-                  ? `<button type="button" class="tr-b ss-tx-stop" data-bc="stop">Detener pantalla</button>`
+                  ? `<button type="button" class="tr-b ss-tx-stop" data-bc="stop">Detener captura de pantalla</button>`
                   : `<button type="button" class="tr-b" data-bc="screen" ${
                       occupiedByOther || !canDisplay ? 'disabled' : ''
-                    }>${canDisplay ? 'Iniciar pantalla protegida' : 'No disponible en este navegador'}</button>`
+                    }>${canDisplay ? 'Iniciar captura de pantalla' : 'No disponible en este navegador'}</button>`
               }
             </div>
           </div>
 
-          <div class="ss-tx-section">
-            <div class="ss-tx-sec-head">
-              <b>b) Multimedia Local (Videos y Fotos · 720p)</b>
-              <small>Audio sincronizado · Playlist privada guardada en tu dispositivo</small>
+          <!-- Option 2: Playlist Multimedia Local (IndexedDB) -->
+          <div class="ss-bc-card ${isSelfEmitter && bSource === 'media' ? 'is-active-source' : ''}">
+            <div class="ss-bc-card-header">
+              <div class="ss-bc-card-icon">${iconMediaPlaylist()}</div>
+              <div class="ss-bc-card-titles">
+                <div style="display:flex;align-items:center;gap:6px">
+                  <b>Playlist Multimedia (IndexedDB)</b>
+                  <span class="ss-count-badge">${items.length}</span>
+                </div>
+                <small>Videos y fotos guardados localmente en tu navegador sin gastar datos</small>
+              </div>
             </div>
 
             <input type="file" id="bc-file-input" multiple accept="video/*,image/*" hidden />
@@ -1072,7 +1106,7 @@ export function renderRoomSheetHtml(sheet, ctx) {
                       })
                       .join('')}
                   </div>`
-                : `<div class="ss-tx-empty">Carga tus videos o fotos para armar tu playlist local.</div>`
+                : `<div class="ss-tx-empty">Tu playlist está vacía. Selecciona videos o fotos para guardar en IndexedDB.</div>`
             }
 
             ${
@@ -1103,10 +1137,10 @@ export function renderRoomSheetHtml(sheet, ctx) {
             <div class="ss-tx-acts" style="margin-top:8px">
               ${
                 isSelfEmitter && bSource === 'media'
-                  ? `<button type="button" class="tr-b ss-tx-stop" data-bc="stop">Detener transmisión</button>`
+                  ? `<button type="button" class="tr-b ss-tx-stop" data-bc="stop">Detener emisión</button>`
                   : `<button type="button" class="tr-b" data-bc="start-media" ${
                       occupiedByOther || items.length === 0 ? 'disabled' : ''
-                    }>${streamActive && isSelfEmitter ? 'Cambiar a multimedia' : 'Emitir en sala (720p)'}</button>`
+                    }>${streamActive && isSelfEmitter ? 'Cambiar a multimedia' : 'Emitir Playlist en Sala (720p)'}</button>`
               }
             </div>
           </div>

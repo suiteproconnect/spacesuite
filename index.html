@@ -2,50 +2,582 @@
 <html lang="es">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#020612" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <meta name="referrer" content="no-referrer" />
-    <title>SPACE SUITE — Salas de video privadas</title>
-    <meta
-      name="description"
-      content="Entra a tu Suite privada sin barreras."
-    />
-    <meta property="og:title" content="SPACE SUITE — Salas de video privadas" />
-    <meta
-      property="og:description"
-      content="Entra a tu Suite privada sin barreras."
-    />
+    <title>SPACE SUITE - Salas de video privadas</title>
+    <meta name="description" content="Entra a tu Suite privada sin barreras." />
+
+    <!-- Open Graph / Social -->
+    <meta property="og:title" content="SPACE SUITE - Salas de video privadas" />
+    <meta property="og:description" content="Entra a tu Suite privada sin barreras." />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="SPACE SUITE" />
-    <meta property="og:url" content="https://spacesuite.pages.dev/" />
-    <meta property="og:image" content="/assets/og-preview.png" />
-    <meta property="og:image:type" content="image/png" />
+    <meta property="og:url" content="https://spacesuite.pages.dev" />
+    <meta property="og:image" content="/assets/og-preview.svg" />
+    <meta property="og:image:type" content="image/svg+xml" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
-    <meta property="og:image:alt" content="SPACE SUITE · Salas de video privadas" />
+    <meta property="og:image:alt" content="SPACE SUITE - Salas de video privadas" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="SPACE SUITE — Salas de video privadas" />
-    <meta
-      name="twitter:description"
-      content="Entra a tu Suite privada sin barreras."
-    />
-    <meta name="twitter:image" content="/assets/og-preview.png" />
-    <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon.png" />
-    <link rel="icon" href="/assets/icon-192.png" />
-    <link rel="apple-touch-icon" href="/assets/icon-180.png" />
+    <meta name="twitter:title" content="SPACE SUITE - Salas de video privadas" />
+    <meta name="twitter:description" content="Entra a tu Suite privada sin barreras." />
+    <meta name="twitter:image" content="/assets/og-preview.svg" />
+
+    <!-- PWA & Icons -->
+    <meta name="theme-color" content="#04060B" />
+    <link rel="icon" href="/assets/aistudio/icon-192-61826486.png" />
+    <link rel="apple-touch-icon" href="/assets/aistudio/icon-180-61826486.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+
+    <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Quicksand:wght@600;700&display=swap"
-      rel="stylesheet"
-    />
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+
+    <!-- Estilos base del proyecto -->
     <link rel="stylesheet" href="/styles.css" />
+
+    <style>
+      /* 1. PORTADA PRINCIPAL SPACE SUITE */
+      #landing-screen {
+        position: fixed;
+        inset: 0;
+        z-index: 99999;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 2rem 1.5rem;
+        font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+        background:
+          radial-gradient(circle at 50% 35%, rgba(29, 78, 216, 0.24) 0%, rgba(4, 6, 11, 0) 52%),
+          radial-gradient(1px 1px at 18% 22%, rgba(255, 255, 255, 0.45) 50%, transparent 100%),
+          radial-gradient(1.5px 1.5px at 82% 18%, rgba(255, 255, 255, 0.35) 50%, transparent 100%),
+          radial-gradient(1px 1px at 74% 68%, rgba(255, 255, 255, 0.4) 50%, transparent 100%),
+          radial-gradient(1px 1px at 24% 76%, rgba(255, 255, 255, 0.3) 50%, transparent 100%),
+          #04060b;
+        transition: opacity 0.3s ease, visibility 0.3s ease;
+      }
+
+      #landing-screen.hidden {
+        opacity: 0;
+        visibility: hidden;
+        pointer-events: none;
+      }
+
+      #landing-screen .brand-icon {
+        position: relative;
+        width: 146px;
+        height: 146px;
+        border-radius: 34px;
+        background: linear-gradient(145deg, #254194 0%, #101b42 55%, #090f26 100%);
+        border: 1.5px solid rgba(147, 197, 253, 0.35);
+        box-shadow:
+          0 20px 50px rgba(0, 0, 0, 0.85),
+          0 0 45px rgba(37, 99, 235, 0.25),
+          inset 0 2px 3px rgba(255, 255, 255, 0.25);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin-bottom: 1.75rem;
+      }
+
+      #landing-screen .brand-icon::after {
+        content: "";
+        position: absolute;
+        top: 16px;
+        right: 16px;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background-color: #34d399;
+        box-shadow: 0 0 10px #34d399;
+      }
+
+      #landing-screen .lens-ring {
+        position: relative;
+        width: 104px;
+        height: 104px;
+        border-radius: 50%;
+        background: radial-gradient(circle at 50% 50%, #071224 45%, #030712 100%);
+        border: 3px solid #1e293b;
+        box-shadow: inset 0 0 18px rgba(52, 211, 153, 0.28);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+      }
+
+      #landing-screen .lens-vortex {
+        position: absolute;
+        inset: 6px;
+        border-radius: 50%;
+        border: 2px solid transparent;
+        border-top-color: rgba(52, 211, 153, 0.45);
+        border-bottom-color: rgba(56, 189, 248, 0.35);
+        filter: blur(1.5px);
+        transform: rotate(-25deg);
+      }
+
+      #landing-screen .lens-s {
+        position: relative;
+        z-index: 2;
+        font-size: 4rem;
+        font-weight: 800;
+        line-height: 1;
+        color: #ffffff;
+        text-shadow:
+          0 0 12px rgba(255, 255, 255, 0.95),
+          0 0 26px rgba(255, 255, 255, 0.65),
+          0 0 42px rgba(52, 211, 153, 0.45);
+      }
+
+      #landing-screen .brand-title {
+        text-align: center;
+        font-size: clamp(2.75rem, 11vw, 3.6rem);
+        font-weight: 800;
+        line-height: 0.96;
+        letter-spacing: -0.02em;
+        color: #ffffff;
+        text-transform: uppercase;
+        margin: 0 0 1.15rem 0;
+      }
+
+      #landing-screen .brand-title span {
+        display: block;
+      }
+
+      #landing-screen .brand-subtitle {
+        text-align: center;
+        font-size: 0.92rem;
+        font-weight: 500;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: #94a3b8;
+        margin: 0 0 2.6rem 0;
+      }
+
+      #landing-screen .brand-subtitle .crimson {
+        color: #dc143c;
+        font-weight: 700;
+      }
+
+      #landing-screen .action-group {
+        display: flex;
+        gap: 0.85rem;
+        width: 100%;
+        max-width: 390px;
+      }
+
+      #landing-screen .btn-suite {
+        flex: 1;
+        height: 50px;
+        border-radius: 12px;
+        font-family: inherit;
+        font-size: 0.8rem;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      #landing-screen .btn-enter {
+        background-color: #34d399;
+        color: #04130d;
+        border: none;
+        box-shadow: 0 8px 24px rgba(52, 211, 153, 0.22);
+      }
+
+      #landing-screen .btn-install {
+        background-color: rgba(10, 14, 26, 0.75);
+        color: #ffffff;
+        border: 1px solid rgba(148, 163, 184, 0.28);
+      }
+
+      /* 2. OCULTAR LOGO Y BIENVENIDA DUPLICADA DE LOBBY.JS */
+      #root [class*="brand"],
+      #root [class*="isotipo"],
+      #root [class*="wordmark"],
+      #root [class*="welcome"],
+      #root [class*="hero"] {
+        display: none !important;
+      }
+
+      /* 3. SALA DE VIDEO TIPO ZOOM A PANTALLA COMPLETA (100dvh #04060B) */
+      #room-root,
+      #room-root #ss-workspace {
+        position: fixed !important;
+        inset: 0 !important;
+        width: 100vw !important;
+        height: 100dvh !important;
+        background: #04060b !important;
+        overflow: hidden !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        z-index: 10 !important;
+      }
+
+      #room-root #ss-workspace[hidden] {
+        display: none !important;
+      }
+
+      /* Cuando NO hay pantalla compartida: mosaico ocupa el 100% de la pantalla */
+      #room-root #ss-workspace:not(.has-screen) #ss-stage-pane {
+        display: none !important;
+      }
+
+      #room-root #ss-workspace:not(.has-screen) #ss-carousel-pane {
+        position: absolute !important;
+        inset: 0 !important;
+        width: 100% !important;
+        height: 100% !important;
+        max-width: 100% !important;
+        max-height: 100% !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        background: #04060b !important;
+        display: flex !important;
+        flex-direction: column !important;
+        box-sizing: border-box !important;
+        overflow: hidden !important;
+      }
+
+      #room-root #ss-workspace:not(.has-screen) #ss-carousel-track {
+        flex: 1 1 auto !important;
+        display: flex !important;
+        width: 100% !important;
+        height: 100% !important;
+        overflow: hidden !important;
+      }
+
+      #room-root #ss-workspace:not(.has-screen) #ss-carousel-track > .ss-carousel-page {
+        flex: 1 0 100% !important;
+        width: 100% !important;
+        height: 100% !important;
+        display: grid !important;
+        gap: 6px !important;
+        padding: 6px !important;
+        box-sizing: border-box !important;
+      }
+
+      /* CUANDO ALGUIEN COMPARTE PANTALLA: pantalla en área principal + tira flotante superior */
+      #room-root #ss-workspace.has-screen #ss-stage-pane {
+        position: absolute !important;
+        inset: 0 !important;
+        width: 100% !important;
+        height: 100% !important;
+        z-index: 12 !important;
+        background: #04060b !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        overflow: hidden !important;
+      }
+
+      #room-root #ss-workspace.has-screen #ss-stage-vid {
+        width: 100% !important;
+        height: 100% !important;
+        object-fit: contain !important;
+        background: #04060b !important;
+      }
+
+      #room-root #ss-workspace.has-screen #ss-carousel-pane {
+        position: absolute !important;
+        top: 14px !important;
+        left: 14px !important;
+        right: 14px !important;
+        height: 96px !important;
+        max-height: 96px !important;
+        z-index: 35 !important;
+        background: transparent !important;
+        border: none !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        display: flex !important;
+        flex-direction: row !important;
+        pointer-events: auto !important;
+      }
+
+      #room-root #ss-workspace.has-screen #ss-carousel-track {
+        display: flex !important;
+        flex-direction: row !important;
+        gap: 8px !important;
+        overflow-x: auto !important;
+        overflow-y: hidden !important;
+        width: 100% !important;
+        height: 100% !important;
+        scrollbar-width: none !important;
+      }
+
+      #room-root #ss-workspace.has-screen #ss-carousel-track::-webkit-scrollbar {
+        display: none !important;
+      }
+
+      #room-root #ss-workspace.has-screen #ss-carousel-track > .ss-carousel-page {
+        display: flex !important;
+        flex-direction: row !important;
+        gap: 8px !important;
+        width: auto !important;
+        height: 100% !important;
+        padding: 0 !important;
+      }
+
+      #room-root #ss-workspace.has-screen .ss-ctile {
+        flex: 0 0 136px !important;
+        width: 136px !important;
+        height: 94px !important;
+        border-radius: 12px !important;
+        border: 1.5px solid rgba(255, 255, 255, 0.22) !important;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.75) !important;
+      }
+
+      /* Mosaicos de video (Participantes) */
+      #room-root #ss-workspace .ss-ctile {
+        position: relative !important;
+        width: 100% !important;
+        min-width: 0 !important;
+        max-width: none !important;
+        height: 100% !important;
+        min-height: 0 !important;
+        border-radius: 14px !important;
+        overflow: hidden !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        background: radial-gradient(circle at 50% 50%, #101b42 0%, #04060b 100%) !important;
+        border: 1px solid rgba(255, 255, 255, 0.14) !important;
+        box-sizing: border-box !important;
+      }
+
+      #room-root #ss-workspace .ss-ctile.is-self {
+        border-color: rgba(52, 211, 153, 0.45) !important;
+      }
+
+      #room-root #ss-workspace .ss-ctile video {
+        position: absolute !important;
+        inset: 0 !important;
+        width: 100% !important;
+        height: 100% !important;
+        object-fit: cover !important;
+      }
+
+      #room-root #ss-workspace .ss-ctile.is-live .ss-ctile-av {
+        display: none !important;
+      }
+
+      #room-root #ss-workspace .ss-ctile-av {
+        font-size: 2.2rem !important;
+        font-weight: 800 !important;
+        color: #ffffff !important;
+        text-shadow: 0 0 16px rgba(255, 255, 255, 0.6) !important;
+      }
+
+      #room-root #ss-workspace .ss-ctile-name {
+        position: absolute !important;
+        bottom: 8px !important;
+        left: 8px !important;
+        padding: 4px 10px !important;
+        border-radius: 8px !important;
+        background: rgba(4, 6, 11, 0.72) !important;
+        -webkit-backdrop-filter: blur(8px) !important;
+        backdrop-filter: blur(8px) !important;
+        color: #ffffff !important;
+        font-size: 0.76rem !important;
+        font-weight: 600 !important;
+        max-width: 80% !important;
+        white-space: nowrap !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+        pointer-events: none !important;
+      }
+
+      /* 4. HUD TÁCTIL OCULTABLE TRAS 3.8 SEGUNDOS */
+      #room-root #ui {
+        position: fixed !important;
+        inset: 0 !important;
+        z-index: 60 !important;
+        pointer-events: none !important;
+        transition: opacity 0.28s ease !important;
+        opacity: 1 !important;
+      }
+
+      body.hud-off #room-root #ui {
+        opacity: 0 !important;
+        pointer-events: none !important;
+      }
+
+      .ss-hud-top {
+        position: absolute !important;
+        top: 16px !important;
+        left: 16px !important;
+        right: 16px !important;
+        display: flex !important;
+        justify-content: space-between !important;
+        align-items: center !important;
+        z-index: 65 !important;
+        pointer-events: auto !important;
+        background: transparent !important;
+        border: none !important;
+      }
+
+      .ss-hud-counter {
+        display: inline-flex !important;
+        align-items: center !important;
+        gap: 8px !important;
+        padding: 6px 14px !important;
+        border-radius: 999px !important;
+        background: rgba(4, 6, 11, 0.82) !important;
+        border: 1px solid rgba(255, 255, 255, 0.16) !important;
+        -webkit-backdrop-filter: blur(12px) !important;
+        backdrop-filter: blur(12px) !important;
+        color: #ffffff !important;
+        font-size: 0.82rem !important;
+        font-weight: 700 !important;
+        letter-spacing: 0.02em !important;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6) !important;
+      }
+
+      .ss-hud-dot {
+        width: 8px !important;
+        height: 8px !important;
+        border-radius: 50% !important;
+        background-color: #34d399 !important;
+        box-shadow: 0 0 10px #34d399 !important;
+        display: inline-block !important;
+      }
+
+      .ss-hud-sep {
+        color: rgba(255, 255, 255, 0.35) !important;
+      }
+
+      .ss-hud-actions {
+        display: flex !important;
+        align-items: center !important;
+        gap: 8px !important;
+      }
+
+      .ss-hud-invite-btn {
+        display: inline-flex !important;
+        align-items: center !important;
+        gap: 6px !important;
+        padding: 7px 16px !important;
+        height: 38px !important;
+        border-radius: 10px !important;
+        background-color: #34d399 !important;
+        color: #04130d !important;
+        font-size: 0.8rem !important;
+        font-weight: 800 !important;
+        letter-spacing: 0.05em !important;
+        text-transform: uppercase !important;
+        border: none !important;
+        cursor: pointer !important;
+        box-shadow: 0 4px 16px rgba(52, 211, 153, 0.35) !important;
+        transition: transform 0.15s ease, opacity 0.15s ease !important;
+      }
+
+      .ss-hud-invite-btn:active {
+        transform: scale(0.96) !important;
+      }
+
+      .ss-hud-invite-btn svg {
+        width: 17px !important;
+        height: 17px !important;
+        color: #04130d !important;
+      }
+
+      .ss-hud-dock {
+        position: absolute !important;
+        bottom: 20px !important;
+        left: 50% !important;
+        transform: translateX(-50%) !important;
+        display: flex !important;
+        align-items: center !important;
+        gap: 10px !important;
+        padding: 8px 14px !important;
+        border-radius: 20px !important;
+        background: rgba(10, 14, 26, 0.88) !important;
+        border: 1px solid rgba(255, 255, 255, 0.14) !important;
+        -webkit-backdrop-filter: blur(16px) !important;
+        backdrop-filter: blur(16px) !important;
+        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.75) !important;
+        z-index: 65 !important;
+        pointer-events: auto !important;
+      }
+    </style>
   </head>
+
   <body class="rd">
+    <!-- PORTADA PRINCIPAL -->
+    <main id="landing-screen" aria-label="Inicio de SPACE SUITE">
+      <div class="brand-icon" aria-hidden="true">
+        <div class="lens-ring">
+          <div class="lens-vortex"></div>
+          <span class="lens-s">S</span>
+        </div>
+      </div>
+
+      <h1 class="brand-title">
+        <span>SPACE</span>
+        <span>SUITE</span>
+      </h1>
+
+      <p class="brand-subtitle">
+        SALAS DE VIDEO <span class="crimson">PRIVADAS</span>
+      </p>
+
+      <div class="action-group">
+        <button id="btn-enter-suite" type="button" class="btn-suite btn-enter">
+          ENTRAR A LA SUITE
+        </button>
+        <button id="btn-install-app" type="button" class="btn-suite btn-install">
+          INSTALAR APP
+        </button>
+      </div>
+    </main>
+
+    <!-- APLICACIÓN PRINCIPAL -->
     <div id="root"></div>
+    <script src="https://cdn.metered.ca/sdk/video/1.4.6/sdk.min.js"></script>
     <script type="module" src="/app.js"></script>
+
+    <script>
+      (function () {
+        const landing = document.getElementById('landing-screen');
+        const params = new URLSearchParams(window.location.search);
+
+        // Si ya viene ?room= en el enlace, oculta portada y entra directo
+        if (params.get('room') || window.location.hash.includes('room')) {
+          landing.classList.add('hidden');
+        }
+
+        // Botón ENTRAR A LA SUITE
+        document.getElementById('btn-enter-suite')?.addEventListener('click', () => {
+          landing.classList.add('hidden');
+        });
+
+        // Instalación PWA
+        let deferredPrompt = null;
+        window.addEventListener('beforeinstallprompt', (e) => {
+          e.preventDefault();
+          deferredPrompt = e;
+        });
+
+        document.getElementById('btn-install-app')?.addEventListener('click', async () => {
+          if (deferredPrompt) {
+            deferredPrompt.prompt();
+            await deferredPrompt.userChoice;
+            deferredPrompt = null;
+          } else {
+            alert('Abre el menú de tu navegador y toca "Instalar aplicación".');
+          }
+        });
+      })();
+    </script>
   </body>
 </html>

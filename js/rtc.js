@@ -62,6 +62,7 @@ export class RoomEngine {
     };
 
     this.roomCode = '';
+    this.roomMode = 'broadcast';
     this.peerId = crypto.randomUUID();
     this.clientId = getPersistentClientId();
     this.joinConfig = null;
@@ -90,6 +91,7 @@ export class RoomEngine {
     this._remoteMidOwner = new Map(); // mid -> ownerKey ('__broadcast__' or peerId)
     this._remoteBroadcastMediaStream = null;
     this._visibleViewerPeerIds = new Set();
+    this.p2pConnections = new Map();
 
     this._destroyed = false;
     this._typingPruneInterval = window.setInterval(() => this._pruneTyping(), 600);
@@ -112,6 +114,25 @@ export class RoomEngine {
       }).catch(() => {});
     };
     window.addEventListener('pagehide', this._onPageHide);
+  }
+
+  isMicUnlocked() {
+    return (
+      this.roomMode === 'normal' ||
+      this.roomMode === 'duo' ||
+      this.state.meta?.mode === 'normal' ||
+      this.state.meta?.mode === 'duo'
+    );
+  }
+
+  getDiagnostics() {
+    const subs = Array.from(this._subscribedRemote.keys()).join(', ') || 'ninguna';
+    return [
+      `sala=${this.roomCode || '-'} | estado=${this.state.status} | ws=${this.state.wsConnected}`,
+      `sfu=${this.callsSessionId ? this.callsSessionId.slice(0, 8) : 'off'} | peers=${this.state.peers.length}/${this.state.roomCapacity}`,
+      `emisor=${this.state.meta?.emitterPeerId ? this.state.meta.emitterPeerId.slice(0, 8) : 'libre'} | camLocal=${Boolean(this._publishedCam)}`,
+      `subs(${this._subscribedRemote.size}): ${subs}`,
+    ].join('\n');
   }
 
   _emit(patch) {
@@ -196,7 +217,7 @@ export class RoomEngine {
       const track = ev.track;
       const mid = ev.transceiver?.mid;
       if (!track || !mid) return;
-      const ownerKey = this._remoteMidOwner.get(mid);
+      const ownerKey = this._remoteMidOwner.get(String(mid));
       if (!ownerKey) return;
 
       const emitStream = () => {
@@ -364,7 +385,7 @@ export class RoomEngine {
         body: JSON.stringify({
           sessionId: this.callsSessionId,
           sessionDescription: { type: 'offer', sdp: pc.localDescription.sdp },
-          tracks: [{ location: 'local', mid: transceiver.mid, trackName }],
+          tracks: [{ location: 'local', mid: String(transceiver.mid), trackName }],
         }),
       });
       const json = await res.json().catch(() => ({}));
@@ -375,7 +396,7 @@ export class RoomEngine {
       await pc.setRemoteDescription(json.sessionDescription);
       this._publishedCam = {
         trackName,
-        mid: transceiver.mid,
+        mid: String(transceiver.mid),
         trackId: camTrack.id,
         transceiver,
       };
@@ -442,7 +463,6 @@ export class RoomEngine {
       await pc.setLocalDescription(offer);
       await this._waitIceGatheringComplete(pc, 1500);
 
-      // mid is only guaranteed after setLocalDescription(offer)
       const tracksMeta = pendingEntries
         .filter((e) => e.transceiver?.mid)
         .map((e) => ({
@@ -477,7 +497,7 @@ export class RoomEngine {
       await pc.setRemoteDescription(json.sessionDescription);
       this._publishedBroadcast = pendingEntries.map((e) => ({
         ...e,
-        mid: e.transceiver.mid,
+        mid: String(e.transceiver.mid),
       }));
       return {
         videoTrackName: pendingEntries.find((e) => e.kind === 'video')?.trackName || null,
@@ -487,9 +507,8 @@ export class RoomEngine {
   }
 
   /**
-   * Called by RoomController whenever the paginated viewer camera carousel turns pages.
-   * Pauses/unsubscribes off-screen viewer camera tracks from Cloudflare Calls SFU so mobile
-   * devices only decode the 4-6 currently visible cameras + active main broadcast.
+   * Mantiene sincronizadas las cámaras de los espectadores visibles sin cerrar
+   * cámaras activas de la sala al entrar o encenderse otro participante.
    */
   setVisibleViewerPeerIds(peerIds) {
     const next = new Set(Array.isArray(peerIds) ? peerIds : []);
@@ -536,10 +555,11 @@ export class RoomEngine {
         }
       }
 
+      // Incluir todas las cámaras activas de la sala (hasta 19 espectadores)
+      // para evitar cierres accidentales cuando room-ui re-renderiza el carrusel
       for (const peer of this.state.peers) {
         if (peer.peerId === this.peerId) continue;
         if (peer.peerId === b?.emitterPeerId) continue;
-        if (!this._visibleViewerPeerIds.has(peer.peerId)) continue;
         if (!peer.camOn || !peer.callsSessionId || !peer.camTrackName) continue;
         desired.set(`cam:${peer.peerId}:${peer.camTrackName}`, {
           kind: 'video',
@@ -549,7 +569,7 @@ export class RoomEngine {
         });
       }
 
-      // Close subscriptions no longer visible or stopped
+      // Cerrar únicamente tracks que realmente dejaron de existir o se apagaron
       const toClose = [];
       for (const [subKey, sub] of this._subscribedRemote.entries()) {
         if (!desired.has(subKey)) {
@@ -573,7 +593,7 @@ export class RoomEngine {
         }
         for (const item of toClose) {
           if (pcNow) {
-            const tr = pcNow.getTransceivers().find((t) => t.mid === item.sub.mid);
+            const tr = pcNow.getTransceivers().find((t) => String(t.mid) === String(item.sub.mid));
             if (tr) {
               try {
                 tr.direction = 'inactive';
@@ -583,7 +603,7 @@ export class RoomEngine {
             }
           }
           this._subscribedRemote.delete(item.subKey);
-          this._remoteMidOwner.delete(item.sub.mid);
+          this._remoteMidOwner.delete(String(item.sub.mid));
           if (item.sub.ownerKey === '__broadcast__') {
             this._remoteBroadcastMediaStream = null;
             this._emit({ remoteBroadcastStream: null });
@@ -595,7 +615,7 @@ export class RoomEngine {
         }
       }
 
-      // Open newly visible subscriptions
+      // Abrir suscripciones nuevas sin afectar las existentes
       const toOpen = [];
       for (const [subKey, req] of desired.entries()) {
         if (!this._subscribedRemote.has(subKey)) {
@@ -623,10 +643,11 @@ export class RoomEngine {
       json.tracks.forEach((respTrack, idx) => {
         const meta = toOpen[idx];
         if (!meta || !respTrack?.mid) return;
-        this._remoteMidOwner.set(String(respTrack.mid), meta.ownerKey);
+        const midStr = String(respTrack.mid);
+        this._remoteMidOwner.set(midStr, meta.ownerKey);
         this._subscribedRemote.set(meta.subKey, {
           ...meta,
-          mid: String(respTrack.mid),
+          mid: midStr,
         });
       });
 
@@ -647,6 +668,7 @@ export class RoomEngine {
   }
 
   _closeSfuConnection() {
+    this._closeAllP2P();
     if (this.sfuPc) {
       this.sfuPc.ontrack = null;
       this.sfuPc.oniceconnectionstatechange = null;
@@ -666,28 +688,224 @@ export class RoomEngine {
     this._emit({ remoteStreams: {}, remoteBroadcastStream: null, weakConnection: false });
   }
 
-  // Strictly NO microphone capture in spaceSUITE group rooms: audio: false always
-  async _acquireLocalMedia(wantCam) {
-    if (!wantCam) {
+  _closeAllP2P() {
+    for (const [, pc] of this.p2pConnections.entries()) {
+      try {
+        pc.close();
+      } catch {
+        // ignore
+      }
+    }
+    this.p2pConnections.clear();
+  }
+
+  _getOrCreateP2p(remotePeerId) {
+    if (this.p2pConnections.has(remotePeerId)) {
+      return this.p2pConnections.get(remotePeerId);
+    }
+    const pc = new RTCPeerConnection({ iceServers: CF_ICE_SERVERS });
+    this.p2pConnections.set(remotePeerId, pc);
+
+    pc.onicecandidate = (e) => {
+      if (e.candidate) {
+        this._sendSignal({
+          type: 'webrtc:signal',
+          targetPeerId: remotePeerId,
+          data: { candidate: e.candidate },
+        });
+      }
+    };
+
+    pc.ontrack = (e) => {
+      // Si Cloudflare Calls SFU está activo, no mezclar tracks P2P para evitar que se sobreescriban
+      if (this.callsSessionId && this.state.callsConfigured) return;
+
+      const incomingStream = e.streams[0] || new MediaStream([e.track]);
+      const isEmitterPeer = remotePeerId === this.state.meta?.emitterPeerId;
+      if (isEmitterPeer && (e.track.kind === 'video' || e.track.kind === 'audio')) {
+        this._emit({ remoteBroadcastStream: incomingStream });
+      }
+      const curr = this.state.remoteStreams[remotePeerId];
+      if (curr) {
+        if (!curr.getTracks().some((t) => t.id === e.track.id)) {
+          curr.addTrack(e.track);
+        }
+      } else {
+        const next = { ...this.state.remoteStreams, [remotePeerId]: incomingStream };
+        this._emit({ remoteStreams: next });
+      }
+    };
+
+    if (!this.callsSessionId || !this.state.callsConfigured) {
+      if (this.state.localStream) {
+        this.state.localStream.getTracks().forEach((track) => {
+          try { pc.addTrack(track, this.state.localStream); } catch {}
+        });
+      }
+      if (this.state.broadcastStream) {
+        this.state.broadcastStream.getTracks().forEach((track) => {
+          try { pc.addTrack(track, this.state.broadcastStream); } catch {}
+        });
+      }
+    }
+
+    return pc;
+  }
+
+  async _negotiateP2P(remotePeerId) {
+    if (this.callsSessionId && this.state.callsConfigured) return;
+    const pc = this._getOrCreateP2p(remotePeerId);
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      this._sendSignal({
+        type: 'webrtc:signal',
+        targetPeerId: remotePeerId,
+        data: { sdp: pc.localDescription },
+      });
+    } catch {
+      // ignore
+    }
+  }
+
+  async _handlePeerSignal(fromPeerId, data) {
+    if (this.callsSessionId && this.state.callsConfigured) return;
+    if (!data || !fromPeerId) return;
+    const pc = this._getOrCreateP2p(fromPeerId);
+    try {
+      if (data.sdp) {
+        if (data.sdp.type === 'offer') {
+          await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          this._sendSignal({
+            type: 'webrtc:signal',
+            targetPeerId: fromPeerId,
+            data: { sdp: pc.localDescription },
+          });
+        } else if (data.sdp.type === 'answer') {
+          await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        }
+      } else if (data.candidate) {
+        await pc.addIceCandidate(new RTCIceCandidate(data.candidate)).catch(() => {});
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  _syncP2PWithRoomPeers() {
+    if (this.callsSessionId && this.state.callsConfigured) {
+      if (this.p2pConnections.size > 0) this._closeAllP2P();
+      return;
+    }
+    const activePeerIds = new Set(this.state.peers.map((p) => p.peerId));
+    for (const [pid, pc] of this.p2pConnections.entries()) {
+      if (!activePeerIds.has(pid)) {
+        try { pc.close(); } catch {}
+        this.p2pConnections.delete(pid);
+        const remCopy = { ...this.state.remoteStreams };
+        delete remCopy[pid];
+        this._emit({ remoteStreams: remCopy });
+      }
+    }
+    for (const peer of this.state.peers) {
+      if (peer.peerId === this.peerId) continue;
+      if (!this.p2pConnections.has(peer.peerId)) {
+        this._getOrCreateP2p(peer.peerId);
+        if (this.peerId < peer.peerId) {
+          this._negotiateP2P(peer.peerId).catch(() => {});
+        }
+      }
+    }
+  }
+
+  _broadcastStreamToP2P(stream) {
+    if (this.callsSessionId && this.state.callsConfigured) return;
+    if (!stream) return;
+    for (const [pid, pc] of this.p2pConnections.entries()) {
+      stream.getTracks().forEach((track) => {
+        try {
+          const senders = pc.getSenders();
+          const existing = senders.find((s) => s.track && s.track.kind === track.kind);
+          if (existing) {
+            existing.replaceTrack(track).catch(() => {});
+          } else {
+            pc.addTrack(track, stream);
+          }
+        } catch {}
+      });
+      if (this.peerId < pid) {
+        this._negotiateP2P(pid).catch(() => {});
+      }
+    }
+  }
+
+  _removeBroadcastStreamFromP2P() {
+    if (this.callsSessionId && this.state.callsConfigured) return;
+    for (const [pid, pc] of this.p2pConnections.entries()) {
+      const senders = pc.getSenders();
+      senders.forEach((s) => {
+        if (s.track && this.state.localStream && !this.state.localStream.getTracks().includes(s.track)) {
+          try {
+            s.replaceTrack(null).catch(() => {});
+          } catch {}
+        }
+      });
+      if (this.peerId < pid) {
+        this._negotiateP2P(pid).catch(() => {});
+      }
+    }
+  }
+
+  async _acquireLocalMedia(wantCam, wantMic = false) {
+    const isUnlocked = this.isMicUnlocked();
+    const isDuo = this.roomMode === 'duo' || this.state.meta?.mode === 'duo';
+    const allowMic = isUnlocked && wantMic;
+    if (!wantCam && !allowMic) {
       return { stream: null, mic: false, cam: false };
     }
     if (!navigator.mediaDevices?.getUserMedia) {
-      this._emit({ mediaNotice: 'Cámara no disponible en este navegador; conectado como espectador.' });
+      this._emit({ mediaNotice: 'Cámara o micrófono no disponible en este navegador.' });
       return { stream: null, mic: false, cam: false };
     }
-    const videoCfg = {
-      ...VIEWER_CAM_CONSTRAINTS,
-      facingMode: this.state.facingMode || 'user',
-    };
+    const videoCfg = wantCam
+      ? isDuo
+        ? {
+            width: { ideal: 1280, max: 1280 },
+            height: { ideal: 720, max: 720 },
+            frameRate: { ideal: 30, max: 30 },
+            facingMode: this.state.facingMode || 'user',
+          }
+        : {
+            ...VIEWER_CAM_CONSTRAINTS,
+            facingMode: this.state.facingMode || 'user',
+          }
+      : false;
+    const audioCfg = allowMic
+      ? {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        }
+      : false;
+
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: videoCfg });
-      stream.getVideoTracks().forEach((t) => {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: audioCfg, video: videoCfg });
+      stream.getTracks().forEach((t) => {
         t.enabled = true;
       });
       this._emit({ mediaNotice: null });
-      return { stream, mic: false, cam: true };
+      return {
+        stream,
+        mic: Boolean(allowMic && stream.getAudioTracks().length > 0),
+        cam: Boolean(wantCam && stream.getVideoTracks().length > 0),
+      };
     } catch {
-      this._emit({ mediaNotice: 'Sin permisos de cámara; conectado al chat y escenario en vivo.' });
+      if (wantCam && allowMic) {
+        return this._acquireLocalMedia(wantCam, false);
+      }
+      this._emit({ mediaNotice: 'Permiso denegado para cámara o micrófono; conectado como espectador.' });
       return { stream: null, mic: false, cam: false };
     }
   }
@@ -766,13 +984,15 @@ export class RoomEngine {
     this._emit(patch);
     const nextEmitter = this.state.meta?.emitterPeerId || null;
 
-    // Enforce auto camera-off when becoming emitter
     if (nextEmitter === this.peerId && prevEmitter !== this.peerId) {
       this._disableLocalCamForEmitter();
     }
 
     if (this.callsSessionId && this.state.status === 'connected') {
       this._syncRemoteSubscriptions();
+    }
+    if (this.state.status === 'connected') {
+      this._syncP2PWithRoomPeers();
     }
   }
 
@@ -822,6 +1042,7 @@ export class RoomEngine {
       const wasWaiting = this.state.status === 'waiting';
       this.reconnectAttempts = 0;
       const incomingPeers = Array.isArray(msg.peers) ? msg.peers : [msg.self];
+      if (msg.meta?.mode) this.roomMode = msg.meta.mode;
       this._applyRoomStatePatch({
         self: msg.self,
         peers: incomingPeers,
@@ -841,6 +1062,7 @@ export class RoomEngine {
       const updatedSelf = incomingPeers.find((p) => p.peerId === this.peerId) || this.state.self;
       const incomingIds = new Set(incomingPeers.map((p) => p.peerId));
       const nextTyping = this.state.typingPeers.filter((tp) => incomingIds.has(tp.peerId));
+      if (msg.meta?.mode) this.roomMode = msg.meta.mode;
       this._applyRoomStatePatch({
         peers: incomingPeers,
         self: updatedSelf,
@@ -882,6 +1104,11 @@ export class RoomEngine {
 
     if (msg.type === 'subtitle:received' && msg.subtitle) {
       this._emit({ lastSubtitle: msg.subtitle });
+      return;
+    }
+
+    if (msg.type === 'webrtc:signal' && msg.fromPeerId) {
+      this._handlePeerSignal(msg.fromPeerId, msg.data);
       return;
     }
 
@@ -940,11 +1167,12 @@ export class RoomEngine {
           JSON.stringify({
             type: 'room:join',
             roomCode: code,
+            mode: joinPayload.mode || this.roomMode || 'broadcast',
             pass: joinPayload.pass,
             peerId: this.peerId,
             clientId: this.clientId,
             name: joinPayload.name,
-            micOn: false,
+            micOn: Boolean(joinPayload.micOn),
             camOn: Boolean(joinPayload.camOn),
             wantHost: Boolean(joinPayload.wantHost),
             callsSessionId: this.callsSessionId,
@@ -1009,11 +1237,12 @@ export class RoomEngine {
         body: JSON.stringify({
           type: 'room:join',
           roomCode: joinPayload.roomCode,
+          mode: joinPayload.mode || this.roomMode || 'broadcast',
           pass: joinPayload.pass,
           peerId: this.peerId,
           clientId: this.clientId,
           name: joinPayload.name,
-          micOn: false,
+          micOn: Boolean(joinPayload.micOn),
           camOn: Boolean(joinPayload.camOn),
           wantHost: Boolean(joinPayload.wantHost),
           callsSessionId: this.callsSessionId,
@@ -1082,24 +1311,30 @@ export class RoomEngine {
   }
 
   async joinRoom(opts) {
+    this.roomMode = opts.mode === 'duo' ? 'duo' : opts.mode === 'normal' ? 'normal' : 'broadcast';
     this.manualLeave = false;
     this._emit({ rejectionMessage: '', mediaNotice: null, status: 'joining' });
 
     let media;
     const pre = opts.precheckedStream;
     const hasLiveCam = Boolean(pre && pre.getVideoTracks().some((t) => t.readyState === 'live'));
+    const isUnlocked = this.isMicUnlocked();
     if (hasLiveCam && opts.camOn) {
-      // Drop any audio track if prechecked stream ever had one — mics strictly locked
-      pre.getAudioTracks().forEach((t) => t.stop());
+      if (!isUnlocked) {
+        pre.getAudioTracks().forEach((t) => t.stop());
+      }
       const vTrack = pre.getVideoTracks()[0];
       vTrack.enabled = true;
-      media = { stream: new MediaStream([vTrack]), mic: false, cam: true };
+      const tracks = [vTrack];
+      if (isUnlocked && opts.micOn && pre.getAudioTracks().length > 0) {
+        tracks.push(pre.getAudioTracks()[0]);
+      }
+      media = { stream: new MediaStream(tracks), mic: Boolean(isUnlocked && opts.micOn), cam: true };
     } else {
       if (pre) pre.getTracks().forEach((t) => t.stop());
-      media = await this._acquireLocalMedia(Boolean(opts.camOn));
+      media = await this._acquireLocalMedia(Boolean(opts.camOn), Boolean(opts.micOn));
     }
 
-    // Create Cloudflare Calls SFU Session
     try {
       const res = await fetch('/api/calls/session', {
         method: 'POST',
@@ -1110,7 +1345,7 @@ export class RoomEngine {
       if (res.status === 403) {
         if (media.stream) media.stream.getTracks().forEach((t) => t.stop());
         this._emit({
-          rejectionMessage: sessionJson.error || 'La sala alcanzó su capacidad máxima (20 usuarios).',
+          rejectionMessage: sessionJson.error || 'La sala alcanzó su capacidad máxima.',
           status: 'rejected',
         });
         return false;
@@ -1118,23 +1353,28 @@ export class RoomEngine {
       if (res.ok && sessionJson.ok) {
         this.callsSessionId = sessionJson.sessionId || null;
         this._emit({
-          roomCapacity: sessionJson.maxParticipants || ROOM_CAPACITY,
+          roomCapacity: this.roomMode === 'duo' ? 2 : (sessionJson.maxParticipants || ROOM_CAPACITY),
           callsConfigured: Boolean(sessionJson.configured && sessionJson.sessionId),
           sfuMode: sessionJson.configured && sessionJson.sessionId ? 'cloudflare-calls' : 'ws-local-preview',
         });
       }
     } catch {
       this.callsSessionId = null;
-      this._emit({ callsConfigured: false, sfuMode: 'ws-local-preview' });
+      this._emit({
+        roomCapacity: this.roomMode === 'duo' ? 2 : ROOM_CAPACITY,
+        callsConfigured: false,
+        sfuMode: 'ws-local-preview',
+      });
     }
 
     this._emit({ localStream: media.stream });
 
     this.joinConfig = {
       roomCode: opts.roomCode,
+      mode: this.roomMode,
       pass: opts.pass,
       name: opts.name,
-      micOn: false,
+      micOn: Boolean(isUnlocked && opts.micOn),
       camOn: media.cam,
       wantHost: Boolean(opts.wantHost),
     };
@@ -1178,10 +1418,66 @@ export class RoomEngine {
     });
   }
 
-  toggleMic() {
+  async toggleMic() {
+    if (!this.isMicUnlocked()) {
+      this._emit({
+        mediaNotice: 'Micrófonos bloqueados en Sala de Emisión Pro · Solo se escucha al emisor principal.',
+      });
+      return;
+    }
+    const current = this.state.self;
+    if (!current) return;
+    const nextMic = !current.micOn;
+
+    let aTrack = this.state.localStream?.getAudioTracks().find((t) => t.readyState === 'live') || null;
+    if (nextMic) {
+      if (!aTrack) {
+        try {
+          const micStream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+          });
+          const newTrack = micStream.getAudioTracks()[0];
+          if (newTrack) {
+            newTrack.enabled = true;
+            if (this.state.localStream) {
+              this.state.localStream.addTrack(newTrack);
+            } else {
+              this.state.localStream = new MediaStream([newTrack]);
+            }
+            aTrack = newTrack;
+          }
+        } catch {
+          this._emit({ mediaNotice: 'No se pudo activar el micrófono.' });
+          return;
+        }
+      } else {
+        aTrack.enabled = true;
+      }
+    } else {
+      if (aTrack) {
+        aTrack.enabled = false;
+      }
+    }
+
+    for (const [, pc] of this.p2pConnections.entries()) {
+      try {
+        const senders = pc.getSenders();
+        const existing = senders.find((s) => s.track && s.track.kind === 'audio');
+        if (existing) {
+          existing.replaceTrack(nextMic ? aTrack : null).catch(() => {});
+        } else if (nextMic && aTrack && this.state.localStream) {
+          pc.addTrack(aTrack, this.state.localStream);
+        }
+      } catch {
+        // ignore
+      }
+    }
+
     this._emit({
-      mediaNotice: 'Micrófonos bloqueados · Solo suena el video o pantalla emitida.',
+      self: { ...current, micOn: nextMic },
+      peers: this.state.peers.map((p) => (p.peerId === this.peerId ? { ...p, micOn: nextMic } : p)),
     });
+    this._sendSignal({ type: 'peer:state', patch: { micOn: nextMic } });
   }
 
   async toggleCam() {
@@ -1303,28 +1599,33 @@ export class RoomEngine {
         return false;
       }
 
-      // 1. Claim lock FIRST in "preparing" state (remote screens stay dark with LED standby)
       const claim = await this.claimEmitter('screen', 'Pantalla compartida');
       if (!claim.ok) {
         this._emit({ mediaNotice: claim.error || 'El escenario de emisión está ocupado.' });
         return false;
       }
 
-      let displayStream;
+      let displayStream = null;
       try {
         displayStream = await navigator.mediaDevices.getDisplayMedia({
-          video: SCREEN_CONSTRAINTS,
+          video: {
+            width: { ideal: 1280, max: 1920 },
+            height: { ideal: 720, max: 1080 },
+            frameRate: { ideal: 30, max: 30 },
+          },
           audio: true,
         });
       } catch (err) {
-        const errName = err instanceof DOMException ? err.name : '';
-        if (errName === 'OverconstrainedError') {
-          try {
-            displayStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
-          } catch {
-            displayStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false }).catch(() => null);
-          }
-        } else {
+        if (err?.name === 'NotAllowedError' && err.message?.toLowerCase().includes('permission denied')) {
+          await this.stopBroadcast();
+          return false;
+        }
+        try {
+          displayStream = await navigator.mediaDevices.getDisplayMedia({
+            video: true,
+            audio: false,
+          });
+        } catch {
           displayStream = null;
         }
       }
@@ -1345,17 +1646,17 @@ export class RoomEngine {
         this.stopBroadcast().catch(() => {});
       };
 
-      // 2. Keep remote black until first live frame from source is ready (privacy safeguard)
       await this._waitFirstVideoFrame(displayStream);
-      if (this.state.meta?.emitterPeerId !== this.peerId) {
-        displayStream.getTracks().forEach((t) => t.stop());
-        return false;
+      if (this.state.meta) {
+        this.state.meta.emitterPeerId = this.peerId;
       }
 
       this._emit({
         screenStream: displayStream,
         broadcastStream: displayStream,
       });
+
+      this._broadcastStreamToP2P(displayStream);
 
       const published = await this._publishBroadcastTracks(displayStream);
       this._sendSignal({
@@ -1388,10 +1689,16 @@ export class RoomEngine {
       });
     }
 
+    if (this.state.meta) {
+      this.state.meta.emitterPeerId = this.peerId;
+    }
+
     this._emit({
       screenStream: null,
       broadcastStream: stream,
     });
+
+    this._broadcastStreamToP2P(stream);
 
     const published = await this._publishBroadcastTracks(stream);
     this._sendSignal({
@@ -1417,6 +1724,7 @@ export class RoomEngine {
   }
 
   async stopBroadcast() {
+    this._removeBroadcastStreamFromP2P();
     if (this._publishedBroadcast.length > 0) {
       const entries = [...this._publishedBroadcast];
       this._publishedBroadcast = [];
@@ -1428,13 +1736,19 @@ export class RoomEngine {
         t.stop();
       });
     }
+    // Limpiar el estado local inmediatamente para evitar que se quede congelado en el escenario
+    if (this.state.meta && this.state.meta.emitterPeerId === this.peerId) {
+      this.state.meta = {
+        ...this.state.meta,
+        emitterPeerId: null,
+        broadcast: { status: 'idle', sourceType: 'none' },
+      };
+    }
     this._emit({
       screenStream: null,
       broadcastStream: null,
     });
-    if (this.state.meta?.emitterPeerId === this.peerId || this.state.self?.role === 'host') {
-      this._sendSignal({ type: 'emitter:release' });
-    }
+    this._sendSignal({ type: 'emitter:release' });
   }
 
   toggleHand() {

@@ -282,6 +282,14 @@ export class LocalRoomWsHub {
         return;
       }
 
+      const requestedMode = body.mode === 'normal' ? 'normal' : body.mode === 'broadcast' ? 'broadcast' : null;
+      if (shouldBeHost && requestedMode) {
+        room.meta.mode = requestedMode;
+      } else if (!room.meta.mode) {
+        room.meta.mode = 'broadcast';
+      }
+      const isNormal = room.meta.mode === 'normal';
+
       const role: PeerInfo['role'] = shouldBeHost ? 'host' : 'guest';
       if (role === 'host') room.meta.hostId = peerId;
       if (!room.admittedClientIds.includes(clientId)) room.admittedClientIds.push(clientId);
@@ -293,8 +301,8 @@ export class LocalRoomWsHub {
         name: cleanName,
         initial: getInitial(cleanName),
         role,
-        micOn: false,
-        micLocked: true,
+        micOn: isNormal ? Boolean(body.micOn) : false,
+        micLocked: isNormal ? false : true,
         camOn: isEmitter ? false : Boolean(body.camOn),
         isEmitter,
         handRaised: existing?.handRaised ?? false,
@@ -353,8 +361,11 @@ export class LocalRoomWsHub {
         sender.name = rawPatch.name.trim().slice(0, 32);
         sender.initial = getInitial(sender.name);
       }
-      sender.micOn = false;
-      sender.micLocked = true;
+      const isNormal = room.meta.mode === 'normal';
+      sender.micLocked = isNormal ? false : true;
+      if (typeof rawPatch.micOn === 'boolean') {
+        sender.micOn = isNormal ? rawPatch.micOn : false;
+      }
       this.broadcastState(room);
       return;
     }

@@ -181,11 +181,12 @@ export function saveSpaceDraftProfile(profile) {
   }
 }
 
-export function buildRoomInviteUrl(code, pass) {
+export function buildRoomInviteUrl(code, pass, mode = null) {
   const cleanCode = normalizeRoomCode(code) || String(code || '').trim().toUpperCase();
   const url = new URL(window.location.origin + '/');
   url.searchParams.set('room', cleanCode);
   if (pass) url.searchParams.set('p', String(pass).trim().toUpperCase());
+  if (mode) url.searchParams.set('m', mode === 'normal' ? 'normal' : 'broadcast');
   return url.toString();
 }
 
@@ -194,24 +195,26 @@ export function getRoomFromUrl() {
     const params = new URLSearchParams(window.location.search);
     const r = params.get('room');
     const p = params.get('p');
+    const m = params.get('m');
+    const mode = m === 'normal' ? 'normal' : m === 'broadcast' ? 'broadcast' : undefined;
     if (r && r.trim()) {
       const code = normalizeRoomCode(r);
       const pass = p ? p.trim().toUpperCase().replace(/[^A-Z0-9]/g, '') : undefined;
-      if (code) return { code, pass };
+      if (code) return { code, pass, mode };
     }
     const pathMatch = /^\/sala\/([A-Za-z0-9-]+)\/?$/i.exec(window.location.pathname);
     if (pathMatch) {
       const code = normalizeRoomCode(pathMatch[1]);
       const pass = p ? p.trim().toUpperCase().replace(/[^A-Z0-9]/g, '') : undefined;
-      if (code) return { code, pass };
+      if (code) return { code, pass, mode };
     }
     const hash = window.location.hash.replace(/^#/, '').trim();
     if (hash) {
-      const m = /^sala-([A-Za-z0-9-]+)(?:\.([A-Za-z0-9]+))?$/i.exec(hash);
-      if (m) {
-        const code = normalizeRoomCode(m[1]);
-        const pass = m[2] ? m[2].toUpperCase() : undefined;
-        if (code) return { code, pass };
+      const match = /^sala-([A-Za-z0-9-]+)(?:\.([A-Za-z0-9]+))?$/i.exec(hash);
+      if (match) {
+        const code = normalizeRoomCode(match[1]);
+        const pass = match[2] ? match[2].toUpperCase() : undefined;
+        if (code) return { code, pass, mode };
       }
     }
   } catch {

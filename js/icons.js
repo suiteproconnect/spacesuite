@@ -417,5 +417,22 @@ export function iconVolume() {
   return `<svg viewBox="0 0 24 24" class="ss-svg" aria-hidden="true"><path d="M4 10v4h4l5 4V6L8 10H4Z"/><path d="M16.5 8.5a5 5 0 0 1 0 7"/><path d="M19 6a8.5 8.5 0 0 1 0 12"/></svg>`;
 }
 
+export function iconMinimize() {
+  return `<svg viewBox="0 0 24 24" class="ss-svg" aria-hidden="true"><path d="M4 14h6v6M20 10h-6V4M10 14L3 21M21 3l-7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>`;
+}
+
+export function iconExpand() {
+  return `<svg viewBox="0 0 24 24" class="ss-svg" aria-hidden="true"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>`;
+}
+
+export function iconScreenShare() {
+  return `<svg viewBox="0 0 24 24" class="ss-svg" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2" stroke="currentColor" stroke-width="1.8" fill="none"/><line x1="8" y1="21" x2="16" y2="21" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><line x1="12" y1="17" x2="12" y2="21" stroke="currentColor" stroke-width="1.8"/><polygon points="10,8 15,10 10,12" fill="currentColor"/></svg>`;
+}
+
+export function iconMediaPlaylist() {
+  return `<svg viewBox="0 0 24 24" class="ss-svg" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3" stroke="currentColor" stroke-width="1.8" fill="none"/><line x1="7" y1="3" x2="7" y2="21" stroke="currentColor" stroke-width="1.5"/><line x1="17" y1="3" x2="17" y2="21" stroke="currentColor" stroke-width="1.5"/><polygon points="10,9 15,12 10,15" fill="currentColor"/></svg>`;
+}
+
+
 
 

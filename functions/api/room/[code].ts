@@ -213,6 +213,14 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
       });
     }
 
+    const requestedMode = body.mode === 'normal' ? 'normal' : body.mode === 'broadcast' ? 'broadcast' : null;
+    if (shouldBeHost && requestedMode) {
+      state.meta.mode = requestedMode;
+    } else if (!state.meta.mode) {
+      state.meta.mode = 'broadcast';
+    }
+    const isNormal = state.meta.mode === 'normal';
+
     const role: PeerInfo['role'] = shouldBeHost ? 'host' : 'guest';
     if (role === 'host') {
       state.meta.hostId = peerId;
@@ -228,8 +236,8 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
       name: cleanName,
       initial: getInitial(cleanName),
       role,
-      micOn: false,
-      micLocked: true,
+      micOn: isNormal ? Boolean(body.micOn) : false,
+      micLocked: isNormal ? false : true,
       camOn: isEmitter ? false : Boolean(body.camOn),
       isEmitter,
       handRaised: alreadyActive?.handRaised ?? false,
@@ -304,7 +312,14 @@ export async function onRequestPost(context: PagesContext<{ code?: string }>): P
 
   if (signalType === 'peer:state') {
     const rawPatch = (body.patch && typeof body.patch === 'object' ? body.patch : {}) as Partial<PeerInfo>;
-    const patch: Partial<PeerInfo> = { micOn: false, micLocked: true, speaking: false };
+    const isNormal = state.meta.mode === 'normal';
+    const patch: Partial<PeerInfo> = {
+      micLocked: isNormal ? false : true,
+      speaking: false,
+    };
+    if (typeof rawPatch.micOn === 'boolean') {
+      patch.micOn = isNormal ? rawPatch.micOn : false;
+    }
     if (typeof rawPatch.camOn === 'boolean') {
       patch.camOn = state.meta.emitterPeerId === peerId ? false : rawPatch.camOn;
     }

@@ -294,30 +294,53 @@ export class LobbyController {
     let body = '';
     if (sc === 'welcome') {
       body = `
-        <div class="tr-body">
-          <button type="button" class="tlg-btn" style="margin:0 auto 12px;width:112px;height:112px;border-radius:26px" data-act="refresh" aria-label="Actualizar app">
-            <img class="tr-logo ${this.logoRefreshing ? 'refreshing' : ''}" style="margin:0" src="/assets/logo-icon.png" alt="SPACE SUITE" width="112" height="112" />
-          </button>
-          <div class="tr-wm" style="margin-bottom:6px"><span>SPACE</span><b>SUITE</b></div>
-          <h2 style="font-size:1.28rem;line-height:1.28;margin:0 auto 8px;max-width:320px;letter-spacing:-0.02em">Bienvenido a SPACE SUITE. Un espacio hecho para sentir y conectar sin barreras</h2>
-          <p style="font-size:0.86rem;color:var(--dim);margin:0 auto 14px;max-width:300px;line-height:1.4">Audio espacial, subtítulos en vivo y latidos para conectar cara a cara.</p>
+        <div class="tr-body" style="padding-top:1.25rem">
+          <div style="text-align:center;margin-bottom:1.15rem">
+            <span style="display:inline-block;padding:4px 12px;border-radius:999px;background:rgba(52,211,153,0.12);border:1px solid rgba(52,211,153,0.3);color:#34d399;font-size:0.75rem;font-weight:700;letter-spacing:0.06em;text-transform:uppercase">
+              Salas y Conexión
+            </span>
+            <h2 style="font-size:1.35rem;font-weight:800;color:#ffffff;margin:10px 0 4px">Elige cómo conectar</h2>
+            <p style="font-size:0.84rem;color:#94a3b8;margin:0">Crea tu sala privada o únete a una existente.</p>
+          </div>
 
-          <div style="display:flex;justify-content:center;margin-bottom:12px">
+          <div class="lb-tiles" style="grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:14px">
+            <button type="button" class="lb-t g" data-act="enter-suite" style="padding:15px 12px">
+              ${iconCam()}
+              <span style="font-size:0.85rem;font-weight:700">Crear Sala Privada</span>
+              <small style="color:rgba(255,255,255,0.7);font-size:0.72rem">Instantánea y segura</small>
+            </button>
+            <button type="button" class="lb-t" data-go="code" style="padding:15px 12px">
+              ${iconInvite()}
+              <span style="font-size:0.85rem;font-weight:700">Unirse con Código</span>
+              <small style="color:var(--dim);font-size:0.72rem">Tengo código de sala</small>
+            </button>
+            <button type="button" class="lb-t" data-go="plans" style="padding:15px 12px">
+              ${iconShield()}
+              <span style="font-size:0.85rem;font-weight:700">Planes y Tarifas</span>
+              <small style="color:var(--dim);font-size:0.72rem">Suite Ilimitada</small>
+            </button>
+            <button type="button" class="lb-t" data-go="login" style="padding:15px 12px">
+              ${iconUsers()}
+              <span style="font-size:0.85rem;font-weight:700">Tengo Cuenta</span>
+              <small style="color:var(--dim);font-size:0.72rem">Iniciar sesión</small>
+            </button>
+          </div>
+
+          <div style="display:flex;gap:10px;justify-content:center;margin-bottom:12px">
             <button type="button" class="btn-superkey" data-act="open-superkey">
               ${iconSuperKey()}
               <span>SUPER KEY</span>
+            </button>
+            <button type="button" class="btn-superkey" data-act="open-tienda" style="border-color:rgba(52,211,153,0.3);background:rgba(52,211,153,0.08);color:#34d399">
+              ${iconReaction('heartbeat')}
+              <span>Tienda de Latidos</span>
             </button>
           </div>
 
           ${pwaBtnHtml}
         </div>
         <div class="tr-bar">
-          <button type="button" class="tr-b" data-act="enter-suite" style="font-size:1.02rem;padding:15px;font-weight:700">Entrar a tu Suite</button>
-          <div class="tr-row2" style="margin-top:6px">
-            <button type="button" class="tr-k" data-go="login">Tengo cuenta</button>
-            <button type="button" class="tr-k" data-go="code">Entrar con código</button>
-            <button type="button" class="tr-k" data-go="plans">Planes</button>
-          </div>
+          <button type="button" class="tr-b" data-act="enter-suite" style="font-size:1.02rem;padding:15px;font-weight:700">Entrar a mi Suite</button>
         </div>
       `;
     } else if (sc === 'reg') {

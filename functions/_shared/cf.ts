@@ -203,6 +203,7 @@ export interface RoomMeta {
   broadcast: RoomBroadcastState;
   suiteProfile?: SuiteProfile | null;
   interactive?: RoomInteractiveState;
+  mode?: 'normal' | 'broadcast';
 }
 
 export interface ChatMessage {
